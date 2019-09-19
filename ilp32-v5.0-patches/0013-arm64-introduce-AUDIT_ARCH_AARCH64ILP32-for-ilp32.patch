@@ -1,0 +1,45 @@
+From 69231c5f741dcc06f41f9675ed6b7d5790a75047 Mon Sep 17 00:00:00 2001
+From: Yury Norov <ynorov@marvell.com>
+Date: Tue, 8 Jan 2019 01:48:29 +0300
+Subject: [PATCH 13/25] arm64: introduce AUDIT_ARCH_AARCH64ILP32 for ilp32
+
+syscall_get_arch() currently makes no difference between arm64 and
+arm64/ilp32. Fix it by adding AUDIT_ARCH_AARCH64ILP32.
+
+Reported-by: Andy Lutomirski <luto@amacapital.net>
+Signed-off-by: Yury Norov <ynorov@marvell.com>
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+---
+ arch/arm64/include/asm/syscall.h | 3 +++
+ include/uapi/linux/audit.h       | 1 +
+ 2 files changed, 4 insertions(+)
+
+diff --git a/arch/arm64/include/asm/syscall.h b/arch/arm64/include/asm/syscall.h
+index 4c17cb1b44c0..219b6a47571e 100644
+--- a/arch/arm64/include/asm/syscall.h
++++ b/arch/arm64/include/asm/syscall.h
+@@ -122,6 +122,9 @@ static inline int syscall_get_arch(void)
+ 	if (is_a32_compat_task())
+ 		return AUDIT_ARCH_ARM;
+ 
++	else if (is_ilp32_compat_task())
++		return AUDIT_ARCH_AARCH64ILP32;
++
+ 	return AUDIT_ARCH_AARCH64;
+ }
+ 
+diff --git a/include/uapi/linux/audit.h b/include/uapi/linux/audit.h
+index f28acd952d03..90f8aa0ce531 100644
+--- a/include/uapi/linux/audit.h
++++ b/include/uapi/linux/audit.h
+@@ -374,6 +374,7 @@ enum {
+ #define __AUDIT_ARCH_LE	   0x40000000
+ 
+ #define AUDIT_ARCH_AARCH64	(EM_AARCH64|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
++#define AUDIT_ARCH_AARCH64ILP32	(EM_AARCH64|__AUDIT_ARCH_LE)
+ #define AUDIT_ARCH_ALPHA	(EM_ALPHA|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
+ #define AUDIT_ARCH_ARM		(EM_ARM|__AUDIT_ARCH_LE)
+ #define AUDIT_ARCH_ARMEB	(EM_ARM)
+-- 
+2.17.1
+
