@@ -1,0 +1,27 @@
+From 1f5717f97dece396bb608d409de34640963579f3 Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Tue, 19 Nov 2019 13:13:29 -0800
+Subject: [PATCH 08/18] thread: Fix unlimited stack
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/include/asm/processor.h | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 1a141b1de2d5..c844c39c55e4 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -59,8 +59,7 @@
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+ #define TASK_SIZE_OF(tsk)	(is_32bit_thread() ? \
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+-// FIXME: DEFAULT_MAP_WINDOW: Use is_ilp32_thread()???
+-#define DEFAULT_MAP_WINDOW	(is_compat_task() ? \
++#define DEFAULT_MAP_WINDOW	((is_compat_task() || is_ilp32_task()) ? \
+ 				TASK_SIZE_32 : DEFAULT_MAP_WINDOW_64)
+ #else
+ #define TASK_SIZE		TASK_SIZE_64
+-- 
+2.17.1
+

@@ -1,0 +1,33 @@
+From 6a2a929813cf4b5963945cee120a2470e27f915d Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Wed, 9 Oct 2019 17:04:02 -0700
+Subject: [PATCH 05/18] Kconfig: Add CONFIG_ARM64_ILP32
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/Kconfig | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 3adcec05b1f6..d77fc94159bd 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1228,6 +1228,15 @@ endif
+ 
+ endif
+ 
++config ARM64_ILP32
++	bool "Kernel support for ILP32"
++	select COMPAT
++	default y
++	help
++	  This option enables support for AArch64 ILP32 user space.  ILP32
++	  is an ABI where long and pointers are 32bits but it uses the AARCH64
++	  instruction set.
++
+ menu "ARMv8.1 architectural features"
+ 
+ config ARM64_HW_AFDBM
+-- 
+2.17.1
+

@@ -1,0 +1,32 @@
+From 2e14af491e0cc4834193a83f980f38a8aba0319b Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Wed, 9 Oct 2019 17:04:02 -0700
+Subject: [PATCH 06/18] bitsperlong: Set for ILP32
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/include/uapi/asm/bitsperlong.h | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/uapi/asm/bitsperlong.h b/arch/arm64/include/uapi/asm/bitsperlong.h
+index 485d60bee26c..ff7e70cbe8c5 100644
+--- a/arch/arm64/include/uapi/asm/bitsperlong.h
++++ b/arch/arm64/include/uapi/asm/bitsperlong.h
+@@ -17,7 +17,13 @@
+ #ifndef __ASM_BITSPERLONG_H
+ #define __ASM_BITSPERLONG_H
+ 
+-#define __BITS_PER_LONG 64
++#if defined(__LP64__)
++# define __BITS_PER_LONG 64
++#elif defined(__ILP32__)
++# define __BITS_PER_LONG 32
++#else
++# error "Unsupported ABI"
++#endif
+ 
+ #include <asm-generic/bitsperlong.h>
+ 
+-- 
+2.17.1
+

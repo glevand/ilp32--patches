@@ -1,0 +1,28 @@
+From d512ccc274f588cbcf4de0b2111a36825098f47a Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Wed, 9 Oct 2019 17:04:03 -0700
+Subject: [PATCH 14/18] ptrace: Mods 1
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/kernel/ptrace.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
+index 3cf3b135027e..5725e473103a 100644
+--- a/arch/arm64/kernel/ptrace.c
++++ b/arch/arm64/kernel/ptrace.c
+@@ -1685,6 +1685,10 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
+ 	void __user *datap = compat_ptr(data);
+ 	int ret;
+ 
++	if (is_ilp32_task()) {
++		return compat_ptrace_request(child, request, caddr, cdata);
++	}
++
+ 	switch (request) {
+ 		case PTRACE_PEEKUSR:
+ 			ret = compat_ptrace_read_user(child, addr, datap);
+-- 
+2.17.1
+

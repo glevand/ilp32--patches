@@ -1,0 +1,345 @@
+From ebbad8478204439b76d9c33ebded2adb3029d050 Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Wed, 9 Oct 2019 17:04:03 -0700
+Subject: [PATCH 17/18] vdso: Copy base files
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/kernel/vdso_ilp32/Makefile         | 85 ++++++++++++++++++
+ .../kernel/vdso_ilp32/gen_vdso_offsets.sh     | 16 ++++
+ arch/arm64/kernel/vdso_ilp32/note.c           | 15 ++++
+ arch/arm64/kernel/vdso_ilp32/sigreturn.S      | 26 ++++++
+ arch/arm64/kernel/vdso_ilp32/vdso.S           | 21 +++++
+ arch/arm64/kernel/vdso_ilp32/vdso.lds.S       | 87 +++++++++++++++++++
+ arch/arm64/kernel/vdso_ilp32/vgettimeofday.c  | 27 ++++++
+ 7 files changed, 277 insertions(+)
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/Makefile
+ create mode 100755 arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/note.c
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/sigreturn.S
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/vdso.S
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+ create mode 100644 arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+
+diff --git a/arch/arm64/kernel/vdso_ilp32/Makefile b/arch/arm64/kernel/vdso_ilp32/Makefile
+new file mode 100644
+index 000000000000..6f6b55c12029
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/Makefile
+@@ -0,0 +1,85 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Building a vDSO image for AArch64.
++#
++# Author: Will Deacon <will.deacon@arm.com>
++# Heavily based on the vDSO Makefiles for other archs.
++#
++
++# Absolute relocation type $(ARCH_REL_TYPE_ABS) needs to be defined before
++# the inclusion of generic Makefile.
++ARCH_REL_TYPE_ABS := R_AARCH64_JUMP_SLOT|R_AARCH64_GLOB_DAT|R_AARCH64_ABS64
++include $(srctree)/lib/vdso/Makefile
++
++obj-vdso := vgettimeofday.o note.o sigreturn.o
++
++# Build rules
++targets := $(obj-vdso) vdso.so vdso.so.dbg
++obj-vdso := $(addprefix $(obj)/, $(obj-vdso))
++
++ldflags-y := -shared -nostdlib -soname=linux-vdso.so.1 --hash-style=sysv \
++		--build-id -n -T
++
++ccflags-y := -fno-common -fno-builtin -fno-stack-protector -ffixed-x18
++ccflags-y += -DDISABLE_BRANCH_PROFILING
++
++CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE) -Os
++KBUILD_CFLAGS			+= $(DISABLE_LTO)
++KASAN_SANITIZE			:= n
++UBSAN_SANITIZE			:= n
++OBJECT_FILES_NON_STANDARD	:= y
++KCOV_INSTRUMENT			:= n
++
++CFLAGS_vgettimeofday.o = -O2 -mcmodel=tiny
++
++ifneq ($(c-gettimeofday-y),)
++  CFLAGS_vgettimeofday.o += -include $(c-gettimeofday-y)
++endif
++
++# Clang versions less than 8 do not support -mcmodel=tiny
++ifeq ($(CONFIG_CC_IS_CLANG), y)
++  ifeq ($(shell test $(CONFIG_CLANG_VERSION) -lt 80000; echo $$?),0)
++    CFLAGS_REMOVE_vgettimeofday.o += -mcmodel=tiny
++  endif
++endif
++
++# Disable gcov profiling for VDSO code
++GCOV_PROFILE := n
++
++obj-y += vdso.o
++extra-y += vdso.lds
++CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
++
++# Force dependency (incbin is bad)
++$(obj)/vdso.o : $(obj)/vdso.so
++
++# Link rule for the .so file, .lds has to be first
++$(obj)/vdso.so.dbg: $(obj)/vdso.lds $(obj-vdso) FORCE
++	$(call if_changed,vdsold_and_vdso_check)
++
++# Strip rule for the .so file
++$(obj)/%.so: OBJCOPYFLAGS := -S
++$(obj)/%.so: $(obj)/%.so.dbg FORCE
++	$(call if_changed,objcopy)
++
++# Generate VDSO offsets using helper script
++gen-vdsosym := $(srctree)/$(src)/gen_vdso_offsets.sh
++quiet_cmd_vdsosym = VDSOSYM $@
++      cmd_vdsosym = $(NM) $< | $(gen-vdsosym) | LC_ALL=C sort > $@
++
++include/generated/vdso-offsets.h: $(obj)/vdso.so.dbg FORCE
++	$(call if_changed,vdsosym)
++
++# Actual build commands
++quiet_cmd_vdsold_and_vdso_check = LD      $@
++      cmd_vdsold_and_vdso_check = $(cmd_ld); $(cmd_vdso_check)
++
++# Install commands for the unstripped file
++quiet_cmd_vdso_install = INSTALL $@
++      cmd_vdso_install = cp $(obj)/$@.dbg $(MODLIB)/vdso/$@
++
++vdso.so: $(obj)/vdso.so.dbg
++	@mkdir -p $(MODLIB)/vdso
++	$(call cmd,vdso_install)
++
++vdso_install: vdso.so
+diff --git a/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh b/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh
+new file mode 100755
+index 000000000000..0664acaf61ff
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0
++
++#
++# Match symbols in the DSO that look like VDSO_*; produce a header file
++# of constant offsets into the shared object.
++#
++# Doing this inside the Makefile will break the $(filter-out) function,
++# causing Kbuild to rebuild the vdso-offsets header file every time.
++#
++# Author: Will Deacon <will.deacon@arm.com
++#
++
++LC_ALL=C
++sed -n -e 's/^00*/0/' -e \
++'s/^\([0-9a-fA-F]*\) . VDSO_\([a-zA-Z0-9_]*\)$/\#define vdso_offset_\2\t0x\1/p'
+diff --git a/arch/arm64/kernel/vdso_ilp32/note.c b/arch/arm64/kernel/vdso_ilp32/note.c
+new file mode 100644
+index 000000000000..eff5bf9efb8b
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/note.c
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2012-2018 ARM Limited
++ *
++ * This supplies .note.* sections to go into the PT_NOTE inside the vDSO text.
++ * Here we can supply some information useful to userland.
++ */
++
++#include <linux/uts.h>
++#include <linux/version.h>
++#include <linux/elfnote.h>
++#include <linux/build-salt.h>
++
++ELFNOTE32("Linux", 0, LINUX_VERSION_CODE);
++BUILD_SALT;
+diff --git a/arch/arm64/kernel/vdso_ilp32/sigreturn.S b/arch/arm64/kernel/vdso_ilp32/sigreturn.S
+new file mode 100644
+index 000000000000..0723aa398d6e
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/sigreturn.S
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Sigreturn trampoline for returning from a signal when the SA_RESTORER
++ * flag is not set.
++ *
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ */
++
++#include <linux/linkage.h>
++#include <asm/unistd.h>
++
++	.text
++
++	nop
++ENTRY(__kernel_rt_sigreturn)
++	.cfi_startproc
++	.cfi_signal_frame
++	.cfi_def_cfa	x29, 0
++	.cfi_offset	x29, 0 * 8
++	.cfi_offset	x30, 1 * 8
++	mov	x8, #__NR_rt_sigreturn
++	svc	#0
++	.cfi_endproc
++ENDPROC(__kernel_rt_sigreturn)
+diff --git a/arch/arm64/kernel/vdso_ilp32/vdso.S b/arch/arm64/kernel/vdso_ilp32/vdso.S
+new file mode 100644
+index 000000000000..d1414fee5274
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vdso.S
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ */
++
++#include <linux/init.h>
++#include <linux/linkage.h>
++#include <linux/const.h>
++#include <asm/page.h>
++
++	.globl vdso_start, vdso_end
++	.section .rodata
++	.balign PAGE_SIZE
++vdso_start:
++	.incbin "arch/arm64/kernel/vdso/vdso.so"
++	.balign PAGE_SIZE
++vdso_end:
++
++	.previous
+diff --git a/arch/arm64/kernel/vdso_ilp32/vdso.lds.S b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+new file mode 100644
+index 000000000000..7ad2d3a0cd48
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * GNU linker script for the VDSO library.
++*
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ * Heavily based on the vDSO linker scripts for other archs.
++ */
++
++#include <linux/const.h>
++#include <asm/page.h>
++#include <asm/vdso.h>
++
++OUTPUT_FORMAT("elf64-littleaarch64", "elf64-bigaarch64", "elf64-littleaarch64")
++OUTPUT_ARCH(aarch64)
++
++SECTIONS
++{
++	PROVIDE(_vdso_data = . - PAGE_SIZE);
++	. = VDSO_LBASE + SIZEOF_HEADERS;
++
++	.hash		: { *(.hash) }			:text
++	.gnu.hash	: { *(.gnu.hash) }
++	.dynsym		: { *(.dynsym) }
++	.dynstr		: { *(.dynstr) }
++	.gnu.version	: { *(.gnu.version) }
++	.gnu.version_d	: { *(.gnu.version_d) }
++	.gnu.version_r	: { *(.gnu.version_r) }
++
++	.note		: { *(.note.*) }		:text	:note
++
++	. = ALIGN(16);
++
++	.text		: { *(.text*) }			:text	=0xd503201f
++	PROVIDE (__etext = .);
++	PROVIDE (_etext = .);
++	PROVIDE (etext = .);
++
++	.eh_frame_hdr	: { *(.eh_frame_hdr) }		:text	:eh_frame_hdr
++	.eh_frame	: { KEEP (*(.eh_frame)) }	:text
++
++	.dynamic	: { *(.dynamic) }		:text	:dynamic
++
++	.rodata		: { *(.rodata*) }		:text
++
++	_end = .;
++	PROVIDE(end = .);
++
++	/DISCARD/	: {
++		*(.note.GNU-stack)
++		*(.data .data.* .gnu.linkonce.d.* .sdata*)
++		*(.bss .sbss .dynbss .dynsbss)
++	}
++}
++
++/*
++ * We must supply the ELF program headers explicitly to get just one
++ * PT_LOAD segment, and set the flags explicitly to make segments read-only.
++ */
++PHDRS
++{
++	text		PT_LOAD		FLAGS(5) FILEHDR PHDRS; /* PF_R|PF_X */
++	dynamic		PT_DYNAMIC	FLAGS(4);		/* PF_R */
++	note		PT_NOTE		FLAGS(4);		/* PF_R */
++	eh_frame_hdr	PT_GNU_EH_FRAME;
++}
++
++/*
++ * This controls what symbols we export from the DSO.
++ */
++VERSION
++{
++	LINUX_2.6.39 {
++	global:
++		__kernel_rt_sigreturn;
++		__kernel_gettimeofday;
++		__kernel_clock_gettime;
++		__kernel_clock_getres;
++	local: *;
++	};
++}
++
++/*
++ * Make the sigreturn code visible to the kernel.
++ */
++VDSO_sigtramp		= __kernel_rt_sigreturn;
+diff --git a/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+new file mode 100644
+index 000000000000..747635501a14
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ARM64 userspace implementations of gettimeofday() and similar.
++ *
++ * Copyright (C) 2018 ARM Limited
++ *
++ */
++#include <linux/time.h>
++#include <linux/types.h>
++
++int __kernel_clock_gettime(clockid_t clock,
++			   struct __kernel_timespec *ts)
++{
++	return __cvdso_clock_gettime(clock, ts);
++}
++
++int __kernel_gettimeofday(struct __kernel_old_timeval *tv,
++			  struct timezone *tz)
++{
++	return __cvdso_gettimeofday(tv, tz);
++}
++
++int __kernel_clock_getres(clockid_t clock_id,
++			  struct __kernel_timespec *res)
++{
++	return __cvdso_clock_getres(clock_id, res);
++}
+-- 
+2.17.1
+
