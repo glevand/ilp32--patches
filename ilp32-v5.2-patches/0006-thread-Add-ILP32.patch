@@ -1,0 +1,151 @@
+From 8b5f41b1173fe85633b8577d77cdd036202b654b Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Fri, 27 Sep 2019 10:58:58 -0700
+Subject: [PATCH 06/14] thread: Add ILP32
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/include/asm/compat.h      | 33 ++++++++++++++++++++++++++++
+ arch/arm64/include/asm/elf.h         |  4 +++-
+ arch/arm64/include/asm/processor.h   |  9 ++++----
+ arch/arm64/include/asm/thread_info.h |  2 ++
+ arch/arm64/mm/mmap.c                 |  2 +-
+ 5 files changed, 44 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/include/asm/compat.h b/arch/arm64/include/asm/compat.h
+index fb8ad4616b3b..3aa5d29a2c67 100644
+--- a/arch/arm64/include/asm/compat.h
++++ b/arch/arm64/include/asm/compat.h
+@@ -215,5 +215,38 @@ static inline int is_compat_thread(struct thread_info *thread)
+ }
+ 
+ #endif /* CONFIG_COMPAT */
++
++static inline int is_ilp32_task(void)
++{
++#if defined(CONFIG_ARM64_ILP32)
++	return test_thread_flag(TIF_ILP32);
++#else
++	return 0;
++#endif
++}
++
++static inline int is_ilp32_thread(struct thread_info *thread)
++{
++#if defined(CONFIG_ARM64_ILP32)
++	return test_ti_thread_flag(thread, TIF_ILP32);
++#else
++	return 0;
++#endif
++}
++
++static inline int is_32bit_task(void)
++{
++#if defined(CONFIG_COMPAT)
++	return is_compat_task() || is_ilp32_task();
++#else
++	return is_ilp32_task();
++#endif
++}
++
++static inline int is_32bit_thread(struct thread_info *thread)
++{
++	return is_compat_thread(thread) || is_ilp32_thread(thread);
++}
++
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_COMPAT_H */
+diff --git a/arch/arm64/include/asm/elf.h b/arch/arm64/include/asm/elf.h
+index 325d9515c0f8..da9014886846 100644
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -136,6 +136,7 @@ typedef struct user_fpsimd_state elf_fpregset_t;
+ #define SET_PERSONALITY(ex)						\
+ ({									\
+ 	clear_thread_flag(TIF_32BIT);					\
++	clear_thread_flag(TIF_ILP32);					\
+ 	current->personality &= ~READ_IMPLIES_EXEC;			\
+ })
+ 
+@@ -163,7 +164,7 @@ extern int arch_setup_additional_pages(struct linux_binprm *bprm,
+ 
+ /* 1GB of VA */
+ #ifdef CONFIG_COMPAT
+-#define STACK_RND_MASK			(test_thread_flag(TIF_32BIT) ? \
++#define STACK_RND_MASK			(is_32bit_task() ? \
+ 						0x7ff >> (PAGE_SHIFT - 12) : \
+ 						0x3ffff >> (PAGE_SHIFT - 12))
+ #else
+@@ -200,6 +201,7 @@ typedef compat_elf_greg_t		compat_elf_gregset_t[COMPAT_ELF_NGREG];
+  */
+ #define COMPAT_SET_PERSONALITY(ex)					\
+ ({									\
++	clear_thread_flag(TIF_ILP32);					\
+ 	set_thread_flag(TIF_32BIT);					\
+  })
+ #define COMPAT_ARCH_DLINFO
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index fd5b1a4efc70..bec228c8f425 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -55,11 +55,12 @@
+ #else
+ #define TASK_SIZE_32		(UL(0x100000000) - PAGE_SIZE)
+ #endif /* CONFIG_ARM64_64K_PAGES */
+-#define TASK_SIZE		(test_thread_flag(TIF_32BIT) ? \
++#define TASK_SIZE		(is_32bit_task() ? \
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+-#define TASK_SIZE_OF(tsk)	(test_tsk_thread_flag(tsk, TIF_32BIT) ? \
++#define TASK_SIZE_OF(tsk)	(is_32bit_thread() ? \
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+-#define DEFAULT_MAP_WINDOW	(test_thread_flag(TIF_32BIT) ? \
++// FIXME: DEFAULT_MAP_WINDOW: Use is_ilp32_thread()???
++#define DEFAULT_MAP_WINDOW	(is_compat_task() ? \
+ 				TASK_SIZE_32 : DEFAULT_MAP_WINDOW_64)
+ #else
+ #define TASK_SIZE		TASK_SIZE_64
+@@ -76,7 +77,7 @@
+ 
+ #ifdef CONFIG_COMPAT
+ #define AARCH32_VECTORS_BASE	0xffff0000
+-#define STACK_TOP		(test_thread_flag(TIF_32BIT) ? \
++#define STACK_TOP		(is_32bit_task() ? \
+ 				AARCH32_VECTORS_BASE : STACK_TOP_MAX)
+ #else
+ #define STACK_TOP		STACK_TOP_MAX
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index 2372e97db29c..07e9e0d6e8f2 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -88,6 +88,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define TIF_SVE			23	/* Scalable Vector Extension in use */
+ #define TIF_SVE_VL_INHERIT	24	/* Inherit sve_vl_onexec across exec */
+ #define TIF_SSBD		25	/* Wants SSB mitigation */
++#define TIF_ILP32		26	/* ILP32 process */
+ 
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+@@ -102,6 +103,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define _TIF_FSCHECK		(1 << TIF_FSCHECK)
+ #define _TIF_32BIT		(1 << TIF_32BIT)
+ #define _TIF_SVE		(1 << TIF_SVE)
++#define _TIF_ILP32		(1 << TIF_ILP32)
+ 
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+diff --git a/arch/arm64/mm/mmap.c b/arch/arm64/mm/mmap.c
+index b050641b5139..a60022a594ba 100644
+--- a/arch/arm64/mm/mmap.c
++++ b/arch/arm64/mm/mmap.c
+@@ -43,7 +43,7 @@ unsigned long arch_mmap_rnd(void)
+ 	unsigned long rnd;
+ 
+ #ifdef CONFIG_COMPAT
+-	if (test_thread_flag(TIF_32BIT))
++	if (is_32bit_task())
+ 		rnd = get_random_long() & ((1UL << mmap_rnd_compat_bits) - 1);
+ 	else
+ #endif
+-- 
+2.17.1
+
