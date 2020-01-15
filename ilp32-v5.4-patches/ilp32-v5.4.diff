@@ -1,0 +1,2548 @@
+ Documentation/arm64/ilp32.txt                    |  52 ++
+ arch/arm64/Kconfig                               |  19 +
+ arch/arm64/Makefile                              |   5 +
+ arch/arm64/include/asm/compat.h                  |  33 +
+ arch/arm64/include/asm/elf.h                     |   4 +-
+ arch/arm64/include/asm/processor.h               |   8 +-
+ arch/arm64/include/asm/syscall.h                 |   4 +
+ arch/arm64/include/asm/thread_info.h             |   2 +
+ arch/arm64/include/asm/unistd.h                  |   1 +
+ arch/arm64/include/asm/vdso.h                    |   3 +
+ arch/arm64/include/uapi/asm/bitsperlong.h        |   8 +-
+ arch/arm64/include/uapi/asm/unistd.h             |   7 +-
+ arch/arm64/kernel/Makefile                       |   3 +
+ arch/arm64/kernel/ptrace.c                       |   4 +
+ arch/arm64/kernel/signal.c                       |  35 +-
+ arch/arm64/kernel/signal_ilp32.c                 | 807 +++++++++++++++++++++++
+ arch/arm64/kernel/sys_ilp32.c                    |  75 +++
+ arch/arm64/kernel/syscall.c                      |  16 +-
+ arch/arm64/kernel/vdso.c                         |  84 ++-
+ arch/arm64/kernel/vdso/Makefile                  |   2 -
+ arch/arm64/kernel/vdso_ilp32/Makefile            | 108 +++
+ arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh |  16 +
+ arch/arm64/kernel/vdso_ilp32/note.c              |  15 +
+ arch/arm64/kernel/vdso_ilp32/sigreturn.S         |  26 +
+ arch/arm64/kernel/vdso_ilp32/vdso.S              |  21 +
+ arch/arm64/kernel/vdso_ilp32/vdso.lds.S          |  87 +++
+ arch/arm64/kernel/vdso_ilp32/vgettimeofday.c     |  27 +
+ copy-files.sh                                    | 175 +++++
+ fs/Kconfig.binfmt                                |   4 +
+ fs/Makefile                                      |   1 +
+ fs/binfmt_arm64_ilp32_elf.c                      | 105 +++
+ include/uapi/linux/audit.h                       |   2 +
+ kernel/ptrace.c                                  |  52 +-
+ make-patches.sh                                  | 153 +++++
+ mm/util.c                                        |   4 +-
+ regenerate-patches.sh                            |  38 ++
+ 36 files changed, 1959 insertions(+), 47 deletions(-)
+
+diff --git a/Documentation/arm64/ilp32.txt b/Documentation/arm64/ilp32.txt
+new file mode 100644
+index 000000000000..5f01a61c92af
+--- /dev/null
++++ b/Documentation/arm64/ilp32.txt
+@@ -0,0 +1,52 @@
++ILP32 AARCH64 SYSCALL ABI
++=========================
++
++This document describes the ILP32 syscall ABI and where it differs
++from the generic compat linux syscall interface.
++
++ILP32 is acronym for memory model which stands for "Integers, Longs and
++Pointers are 32-bit". The main purpose of ILP32 in Linux kernel is providing
++compatibility with 32-bit legacy code. Also, ILP32 binaries look better in some
++performance tests. ARM has AN490 document which coves ILP32 details for ARM64
++platform:
++http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dai0490a/ar01s01.html
++
++AARCH64/ILP32 userspace may pass garbage in the top halve of w0-w7 registers
++(syscall arguments). So top 32 bits are zeroed for them.
++
++Comparing to AARCH32, AARCH64/ILP32 has 64-bit length of following types:
++ino_t       is u64 type.
++off_t       is s64 type.
++blkcnt_t    is s64 type.
++fsblkcnt_t  is u64 type.
++fsfilcnt_t  is u64 type.
++rlim_t      is u64 type.
++
++AARCH64/ILP32 ABI uses standard syscall table which can be found at
++include/uapi/asm-generic/unistd.h, with the exceptions listed below.
++
++Syscalls which pass 64-bit values are handled by the code shared from
++AARCH32 and pass that value as a pair. Following syscalls are affected:
++fadvise64_64()
++fallocate()
++ftruncate64()
++pread64()
++pwrite64()
++readahead()
++sync_file_range()
++truncate64()
++
++ptrace() syscall is handled by compat version.
++
++shmat() syscall is handled by non-compat handler as aarch64/ilp32 has no
++limitation on 4-pages alignment for shared memory.
++
++statfs() and fstatfs() take the size of struct statfs as an argument.
++It is calculated differently in kernel and user spaces. So AARCH32 handlers
++are taken to handle it.
++
++struct rt_sigframe is redefined and contains struct compat_siginfo,
++as compat syscalls expect, and struct ilp32_ucontext, to handle
++AARCH64 register set and 32-bit userspace register representation.
++
++elf_gregset_t is taken from lp64 to handle registers properly.
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 3f047afb982c..e82be24ffa4f 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1283,6 +1283,25 @@ endif
+ 
+ endif
+ 
++config ARM64_ILP32
++	bool "Kernel support for ILP32"
++	select COMPAT
++	select BINFMT_ARM64_ILP32 if BINFMT_ELF
++	select ARM64_ILP32_VDSO
++	default y
++	help
++	  This option enables support for AArch64 ILP32 user space.  ILP32
++	  is an ABI where long and pointers are 32bits but it uses the AARCH64
++	  instruction set.
++
++config ARM64_ILP32_VDSO
++	bool "VDSO support for ILP32"
++	depends on ARM64_ILP32
++	default y
++	help
++	  This option enables VDSO support for AArch64 ILP32.
++	  If unsure, say Y.
++
+ menu "ARMv8.1 architectural features"
+ 
+ config ARM64_HW_AFDBM
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index 2c0238ce0551..ce00a30f18da 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -142,6 +142,8 @@ zinstall install:
+ PHONY += vdso_install
+ vdso_install:
+ 	$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso $@
++	$(if $(CONFIG_ARM64_ILP32_VDSO),$(Q)$(MAKE) \
++		$(build)=arch/arm64/kernel/vdso_ilp32 $@)
+ 
+ # We use MRPROPER_FILES and CLEAN_FILES now
+ archclean:
+@@ -160,6 +162,9 @@ vdso_prepare: prepare0
+ 	$(if $(CONFIG_COMPAT_VDSO),$(Q)$(MAKE) \
+ 		$(build)=arch/arm64/kernel/vdso32  \
+ 		include/generated/vdso32-offsets.h)
++	$(if $(CONFIG_ARM64_ILP32_VDSO),$(Q)$(MAKE) \
++		$(build)=arch/arm64/kernel/vdso_ilp32  \
++		include/generated/vdso-ilp32-offsets.h)
+ endif
+ 
+ define archhelp
+diff --git a/arch/arm64/include/asm/compat.h b/arch/arm64/include/asm/compat.h
+index b0d53a265f1d..b92f3df36b13 100644
+--- a/arch/arm64/include/asm/compat.h
++++ b/arch/arm64/include/asm/compat.h
+@@ -214,4 +214,37 @@ static inline int is_compat_thread(struct thread_info *thread)
+ }
+ 
+ #endif /* CONFIG_COMPAT */
++
++static inline int is_ilp32_task(void)
++{
++#if defined(CONFIG_ARM64_ILP32)
++	return test_thread_flag(TIF_ILP32);
++#else
++	return 0;
++#endif
++}
++
++static inline int is_ilp32_thread(struct thread_info *thread)
++{
++#if defined(CONFIG_ARM64_ILP32)
++	return test_ti_thread_flag(thread, TIF_ILP32);
++#else
++	return 0;
++#endif
++}
++
++static inline int is_32bit_task(void)
++{
++#if defined(CONFIG_COMPAT)
++	return is_compat_task() || is_ilp32_task();
++#else
++	return is_ilp32_task();
++#endif
++}
++
++static inline int is_32bit_thread(struct thread_info *thread)
++{
++	return is_compat_thread(thread) || is_ilp32_thread(thread);
++}
++
+ #endif /* __ASM_COMPAT_H */
+diff --git a/arch/arm64/include/asm/elf.h b/arch/arm64/include/asm/elf.h
+index b618017205a3..e8979f47943e 100644
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -136,6 +136,7 @@ typedef struct user_fpsimd_state elf_fpregset_t;
+ #define SET_PERSONALITY(ex)						\
+ ({									\
+ 	clear_thread_flag(TIF_32BIT);					\
++	clear_thread_flag(TIF_ILP32);					\
+ 	current->personality &= ~READ_IMPLIES_EXEC;			\
+ })
+ 
+@@ -163,7 +164,7 @@ extern int arch_setup_additional_pages(struct linux_binprm *bprm,
+ 
+ /* 1GB of VA */
+ #ifdef CONFIG_COMPAT
+-#define STACK_RND_MASK			(test_thread_flag(TIF_32BIT) ? \
++#define STACK_RND_MASK			(is_32bit_task() ? \
+ 						0x7ff >> (PAGE_SHIFT - 12) : \
+ 						0x3ffff >> (PAGE_SHIFT - 12))
+ #else
+@@ -200,6 +201,7 @@ typedef compat_elf_greg_t		compat_elf_gregset_t[COMPAT_ELF_NGREG];
+  */
+ #define COMPAT_SET_PERSONALITY(ex)					\
+ ({									\
++	clear_thread_flag(TIF_ILP32);					\
+ 	set_thread_flag(TIF_32BIT);					\
+  })
+ #ifdef CONFIG_COMPAT_VDSO
+diff --git a/arch/arm64/include/asm/processor.h b/arch/arm64/include/asm/processor.h
+index 5623685c7d13..9e19924495e5 100644
+--- a/arch/arm64/include/asm/processor.h
++++ b/arch/arm64/include/asm/processor.h
+@@ -54,11 +54,11 @@
+ #else
+ #define TASK_SIZE_32		(UL(0x100000000) - PAGE_SIZE)
+ #endif /* CONFIG_ARM64_64K_PAGES */
+-#define TASK_SIZE		(test_thread_flag(TIF_32BIT) ? \
++#define TASK_SIZE		(is_32bit_task() ? \
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+-#define TASK_SIZE_OF(tsk)	(test_tsk_thread_flag(tsk, TIF_32BIT) ? \
++#define TASK_SIZE_OF(tsk)	(is_32bit_thread() ? \
+ 				TASK_SIZE_32 : TASK_SIZE_64)
+-#define DEFAULT_MAP_WINDOW	(test_thread_flag(TIF_32BIT) ? \
++#define DEFAULT_MAP_WINDOW	((is_compat_task() || is_ilp32_task()) ? \
+ 				TASK_SIZE_32 : DEFAULT_MAP_WINDOW_64)
+ #else
+ #define TASK_SIZE		TASK_SIZE_64
+@@ -75,7 +75,7 @@
+ 
+ #ifdef CONFIG_COMPAT
+ #define AARCH32_VECTORS_BASE	0xffff0000
+-#define STACK_TOP		(test_thread_flag(TIF_32BIT) ? \
++#define STACK_TOP		(is_32bit_task() ? \
+ 				AARCH32_VECTORS_BASE : STACK_TOP_MAX)
+ #else
+ #define STACK_TOP		STACK_TOP_MAX
+diff --git a/arch/arm64/include/asm/syscall.h b/arch/arm64/include/asm/syscall.h
+index 65299a2dcf9c..475a2d3e640b 100644
+--- a/arch/arm64/include/asm/syscall.h
++++ b/arch/arm64/include/asm/syscall.h
+@@ -12,6 +12,7 @@
+ typedef long (*syscall_fn_t)(const struct pt_regs *regs);
+ 
+ extern const syscall_fn_t sys_call_table[];
++extern const syscall_fn_t ilp32_sys_call_table[];
+ 
+ #ifdef CONFIG_COMPAT
+ extern const syscall_fn_t compat_sys_call_table[];
+@@ -81,6 +82,9 @@ static inline int syscall_get_arch(struct task_struct *task)
+ 	if (is_compat_thread(task_thread_info(task)))
+ 		return AUDIT_ARCH_ARM;
+ 
++	else if (is_ilp32_task())
++		return AUDIT_ARCH_AARCH64ILP32;
++
+ 	return AUDIT_ARCH_AARCH64;
+ }
+ 
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index f0cec4160136..2acbf75b61b1 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -78,6 +78,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define TIF_SVE_VL_INHERIT	24	/* Inherit sve_vl_onexec across exec */
+ #define TIF_SSBD		25	/* Wants SSB mitigation */
+ #define TIF_TAGGED_ADDR		26	/* Allow tagged user addresses */
++#define TIF_ILP32		27	/* ILP32 process */
+ 
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+@@ -93,6 +94,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define _TIF_FSCHECK		(1 << TIF_FSCHECK)
+ #define _TIF_32BIT		(1 << TIF_32BIT)
+ #define _TIF_SVE		(1 << TIF_SVE)
++#define _TIF_ILP32		(1 << TIF_ILP32)
+ 
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+diff --git a/arch/arm64/include/asm/unistd.h b/arch/arm64/include/asm/unistd.h
+index 2629a68b8724..a1bccafc97b7 100644
+--- a/arch/arm64/include/asm/unistd.h
++++ b/arch/arm64/include/asm/unistd.h
+@@ -4,6 +4,7 @@
+  */
+ #ifdef CONFIG_COMPAT
+ #define __ARCH_WANT_COMPAT_STAT64
++#define __ARCH_WANT_SYS_LLSEEK		// FIXME: Only for ilp32???
+ #define __ARCH_WANT_SYS_GETHOSTNAME
+ #define __ARCH_WANT_SYS_PAUSE
+ #define __ARCH_WANT_SYS_GETPGRP
+diff --git a/arch/arm64/include/asm/vdso.h b/arch/arm64/include/asm/vdso.h
+index 07468428fd29..92b26a3ca8ea 100644
+--- a/arch/arm64/include/asm/vdso.h
++++ b/arch/arm64/include/asm/vdso.h
+@@ -18,6 +18,9 @@
+ #ifdef CONFIG_COMPAT_VDSO
+ #include <generated/vdso32-offsets.h>
+ #endif
++#ifdef CONFIG_ARM64_ILP32_VDSO
++#include <generated/vdso-ilp32-offsets.h>
++#endif
+ 
+ #define VDSO_SYMBOL(base, name)						   \
+ ({									   \
+diff --git a/arch/arm64/include/uapi/asm/bitsperlong.h b/arch/arm64/include/uapi/asm/bitsperlong.h
+index 485d60bee26c..ff7e70cbe8c5 100644
+--- a/arch/arm64/include/uapi/asm/bitsperlong.h
++++ b/arch/arm64/include/uapi/asm/bitsperlong.h
+@@ -17,7 +17,13 @@
+ #ifndef __ASM_BITSPERLONG_H
+ #define __ASM_BITSPERLONG_H
+ 
+-#define __BITS_PER_LONG 64
++#if defined(__LP64__)
++# define __BITS_PER_LONG 64
++#elif defined(__ILP32__)
++# define __BITS_PER_LONG 32
++#else
++# error "Unsupported ABI"
++#endif
+ 
+ #include <asm-generic/bitsperlong.h>
+ 
+diff --git a/arch/arm64/include/uapi/asm/unistd.h b/arch/arm64/include/uapi/asm/unistd.h
+index 4703d218663a..dde163997375 100644
+--- a/arch/arm64/include/uapi/asm/unistd.h
++++ b/arch/arm64/include/uapi/asm/unistd.h
+@@ -15,9 +15,14 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#if defined(__ILP32__) || defined(__SYSCALL_COMPAT)
++#define __ARCH_WANT_SYNC_FILE_RANGE2
++#else
+ #define __ARCH_WANT_RENAMEAT
+-#define __ARCH_WANT_NEW_STAT
+ #define __ARCH_WANT_SET_GET_RLIMIT
++#endif
++
++#define __ARCH_WANT_NEW_STAT
+ #define __ARCH_WANT_TIME32_SYSCALLS
+ 
+ #include <asm-generic/unistd.h>
+diff --git a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+index 478491f07b4f..da5ea9293829 100644
+--- a/arch/arm64/kernel/Makefile
++++ b/arch/arm64/kernel/Makefile
+@@ -32,6 +32,8 @@ obj-$(CONFIG_COMPAT)			+= sys32.o signal32.o			\
+ ifneq ($(CONFIG_COMPAT_VDSO), y)
+ obj-$(CONFIG_COMPAT)			+= sigreturn32.o
+ endif
++obj-$(CONFIG_ARM64_ILP32)		+= sys_ilp32.o
++obj-$(CONFIG_ARM64_ILP32)		+= signal_ilp32.o
+ obj-$(CONFIG_KUSER_HELPERS)		+= kuser32.o
+ obj-$(CONFIG_FUNCTION_TRACER)		+= ftrace.o entry-ftrace.o
+ obj-$(CONFIG_MODULES)			+= module.o
+@@ -66,6 +68,7 @@ obj-$(CONFIG_ARM64_PTR_AUTH)		+= pointer_auth.o
+ 
+ obj-y					+= vdso/ probes/
+ obj-$(CONFIG_COMPAT_VDSO)		+= vdso32/
++obj-$(CONFIG_ARM64_ILP32_VDSO)		+= vdso_ilp32/
+ head-y					:= head.o
+ extra-y					+= $(head-y) vmlinux.lds
+ 
+diff --git a/arch/arm64/kernel/ptrace.c b/arch/arm64/kernel/ptrace.c
+index 21176d02e21a..e6b894ca2900 100644
+--- a/arch/arm64/kernel/ptrace.c
++++ b/arch/arm64/kernel/ptrace.c
+@@ -1685,6 +1685,10 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
+ 	void __user *datap = compat_ptr(data);
+ 	int ret;
+ 
++	if (is_ilp32_task()) {
++		return compat_ptrace_request(child, request, caddr, cdata);
++	}
++
+ 	switch (request) {
+ 		case PTRACE_PEEKUSR:
+ 			ret = compat_ptrace_read_user(child, addr, datap);
+diff --git a/arch/arm64/kernel/signal.c b/arch/arm64/kernel/signal.c
+index dd2cdc0d5be2..dde1404d6419 100644
+--- a/arch/arm64/kernel/signal.c
++++ b/arch/arm64/kernel/signal.c
+@@ -47,7 +47,7 @@ struct frame_record {
+ };
+ 
+ struct rt_sigframe_user_layout {
+-	struct rt_sigframe __user *sigframe;
++	void __user *sigframe;
+ 	struct frame_record __user *next_frame;
+ 
+ 	unsigned long size;	/* size of allocated sigframe data */
+@@ -60,19 +60,28 @@ struct rt_sigframe_user_layout {
+ 	unsigned long end_offset;
+ };
+ 
++static unsigned long get_sigset(sigset_t *set, const sigset_t *mask)
++{
++	return __copy_from_user(set, mask, sizeof(*set));
++}
++
++static unsigned long put_sigset(const sigset_t *set, sigset_t *mask)
++{
++	return __copy_to_user(mask, set, sizeof(*set));
++}
++
+ #define BASE_SIGFRAME_SIZE round_up(sizeof(struct rt_sigframe), 16)
+ #define TERMINATOR_SIZE round_up(sizeof(struct _aarch64_ctx), 16)
+ #define EXTRA_CONTEXT_SIZE round_up(sizeof(struct extra_context), 16)
++#define SIGCONTEXT_RESERVED_SIZE sizeof(((struct sigcontext *)0)->__reserved)
++#define RT_SIGFRAME_RESERVED_OFFSET offsetof(struct rt_sigframe, uc.uc_mcontext.__reserved)
+ 
+ static void init_user_layout(struct rt_sigframe_user_layout *user)
+ {
+-	const size_t reserved_size =
+-		sizeof(user->sigframe->uc.uc_mcontext.__reserved);
+-
+ 	memset(user, 0, sizeof(*user));
+-	user->size = offsetof(struct rt_sigframe, uc.uc_mcontext.__reserved);
++	user->size = RT_SIGFRAME_RESERVED_OFFSET;
+ 
+-	user->limit = user->size + reserved_size;
++	user->limit = user->size + SIGCONTEXT_RESERVED_SIZE;
+ 
+ 	user->limit -= TERMINATOR_SIZE;
+ 	user->limit -= EXTRA_CONTEXT_SIZE;
+@@ -486,7 +495,7 @@ static int restore_sigframe(struct pt_regs *regs,
+ 	int i, err;
+ 	struct user_ctxs user;
+ 
+-	err = __copy_from_user(&set, &sf->uc.uc_sigmask, sizeof(set));
++	err = get_sigset(&set, &sf->uc.uc_sigmask);
+ 	if (err == 0)
+ 		set_current_blocked(&set);
+ 
+@@ -621,7 +630,7 @@ static int setup_sigframe(struct rt_sigframe_user_layout *user,
+ 
+ 	__put_user_error(current->thread.fault_address, &sf->uc.uc_mcontext.fault_address, err);
+ 
+-	err |= __copy_to_user(&sf->uc.uc_sigmask, set, sizeof(*set));
++	err |= put_sigset(set, &sf->uc.uc_sigmask);
+ 
+ 	if (err == 0) {
+ 		struct fpsimd_context __user *fpsimd_ctx =
+@@ -709,7 +718,7 @@ static int get_sigframe(struct rt_sigframe_user_layout *user,
+ 	user->next_frame = (struct frame_record __user *)sp;
+ 
+ 	sp = round_down(sp, 16) - sigframe_size(user);
+-	user->sigframe = (struct rt_sigframe __user *)sp;
++	user->sigframe = (void __user *)sp;
+ 
+ 	/*
+ 	 * Check that we can actually write to the signal frame.
+@@ -753,7 +762,7 @@ static int setup_rt_frame(int usig, struct ksignal *ksig, sigset_t *set,
+ 	frame = user.sigframe;
+ 
+ 	__put_user_error(0, &frame->uc.uc_flags, err);
+-	__put_user_error(NULL, &frame->uc.uc_link, err);
++	__put_user_error((typeof(frame->uc.uc_link)) 0, &frame->uc.uc_link, err);
+ 
+ 	err |= __save_altstack(&frame->uc.uc_stack, regs->sp);
+ 	err |= setup_sigframe(&user, regs, set);
+@@ -797,6 +806,12 @@ static void handle_signal(struct ksignal *ksig, struct pt_regs *regs)
+ 			ret = compat_setup_rt_frame(usig, ksig, oldset, regs);
+ 		else
+ 			ret = compat_setup_frame(usig, ksig, oldset, regs);
++	} else if (is_ilp32_task()) {
++#if defined(CONFIG_ARM64_ILP32)
++		int ilp32_setup_rt_frame(int usig, struct ksignal *ksig,
++			sigset_t *set, struct pt_regs *regs);
++		ret = ilp32_setup_rt_frame(usig, ksig, oldset, regs);
++#endif
+ 	} else {
+ 		ret = setup_rt_frame(usig, ksig, oldset, regs);
+ 	}
+diff --git a/arch/arm64/kernel/signal_ilp32.c b/arch/arm64/kernel/signal_ilp32.c
+new file mode 100644
+index 000000000000..2f434f218c8c
+--- /dev/null
++++ b/arch/arm64/kernel/signal_ilp32.c
+@@ -0,0 +1,807 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Based on arch/arm/kernel/signal.c
++ *
++ * Copyright (C) 1995-2009 Russell King
++ * Copyright (C) 2012 ARM Ltd.
++ */
++
++#include <linux/cache.h>
++#include <linux/compat.h>
++#include <linux/errno.h>
++#include <linux/kernel.h>
++#include <linux/signal.h>
++#include <linux/personality.h>
++#include <linux/freezer.h>
++#include <linux/stddef.h>
++#include <linux/uaccess.h>
++#include <linux/sizes.h>
++#include <linux/string.h>
++#include <linux/tracehook.h>
++#include <linux/ratelimit.h>
++#include <linux/syscalls.h>
++
++#include <asm/daifflags.h>
++#include <asm/debug-monitors.h>
++#include <asm/elf.h>
++#include <asm/cacheflush.h>
++#include <asm/ucontext.h>
++#include <asm/unistd.h>
++#include <asm/fpsimd.h>
++#include <asm/ptrace.h>
++#include <asm/signal32.h>
++#include <asm/traps.h>
++#include <asm/vdso.h>
++
++struct ilp32_ucontext {
++	u32		uc_flags;
++	u32		uc_link;
++	compat_stack_t	uc_stack;
++	compat_sigset_t	uc_sigmask;
++	/* glibc uses a 1024-bit sigset_t */
++	__u8		__unused[1024 / 8 - sizeof(compat_sigset_t)];
++	/* last for future expansion */
++	struct sigcontext uc_mcontext;
++};
++
++/*
++ * Do a signal return; undo the signal stack. These are aligned to 128-bit.
++ */
++struct rt_sigframe {
++	struct compat_siginfo info;
++	struct ilp32_ucontext uc;
++};
++
++struct frame_record {
++	u64 fp;
++	u64 lr;
++};
++
++struct rt_sigframe_user_layout {
++	void __user *sigframe;
++	struct frame_record __user *next_frame;
++
++	unsigned long size;	/* size of allocated sigframe data */
++	unsigned long limit;	/* largest allowed size */
++
++	unsigned long fpsimd_offset;
++	unsigned long esr_offset;
++	unsigned long sve_offset;
++	unsigned long extra_offset;
++	unsigned long end_offset;
++};
++
++static int get_sigset(sigset_t *set, const compat_sigset_t __user *mask)
++{
++	compat_sigset_t set32;
++
++	BUILD_BUG_ON(sizeof(compat_sigset_t) != sizeof(sigset_t));
++
++	if (copy_from_user(&set32, mask, sizeof(set32)))
++		return -EFAULT;
++
++	set->sig[0] = set32.sig[0] | (((long)set32.sig[1]) << 32);
++	return 0;
++}
++
++static int put_sigset(const sigset_t *set, compat_sigset_t __user *mask)
++{
++	compat_sigset_t set32;
++
++	BUILD_BUG_ON(sizeof(compat_sigset_t) != sizeof(sigset_t));
++
++	set32.sig[0] = set->sig[0] & 0xffffffffull;
++	set32.sig[1] = set->sig[0] >> 32;
++
++	return copy_to_user(mask, &set32, sizeof(set32));
++}
++
++#define BASE_SIGFRAME_SIZE round_up(sizeof(struct rt_sigframe), 16)
++#define TERMINATOR_SIZE round_up(sizeof(struct _aarch64_ctx), 16)
++#define EXTRA_CONTEXT_SIZE round_up(sizeof(struct extra_context), 16)
++#define SIGCONTEXT_RESERVED_SIZE sizeof(((struct sigcontext *)0)->__reserved)
++#define RT_SIGFRAME_RESERVED_OFFSET offsetof(struct rt_sigframe, uc.uc_mcontext.__reserved)
++
++static void init_user_layout(struct rt_sigframe_user_layout *user)
++{
++	memset(user, 0, sizeof(*user));
++	user->size = RT_SIGFRAME_RESERVED_OFFSET;
++
++	user->limit = user->size + SIGCONTEXT_RESERVED_SIZE;
++
++	user->limit -= TERMINATOR_SIZE;
++	user->limit -= EXTRA_CONTEXT_SIZE;
++	/* Reserve space for extension and terminator ^ */
++}
++
++static size_t sigframe_size(struct rt_sigframe_user_layout const *user)
++{
++	return round_up(max(user->size, sizeof(struct rt_sigframe)), 16);
++}
++
++/*
++ * Sanity limit on the approximate maximum size of signal frame we'll
++ * try to generate.  Stack alignment padding and the frame record are
++ * not taken into account.  This limit is not a guarantee and is
++ * NOT ABI.
++ */
++#define SIGFRAME_MAXSZ SZ_64K
++
++static int __sigframe_alloc(struct rt_sigframe_user_layout *user,
++			    unsigned long *offset, size_t size, bool extend)
++{
++	size_t padded_size = round_up(size, 16);
++
++	if (padded_size > user->limit - user->size &&
++	    !user->extra_offset &&
++	    extend) {
++		int ret;
++
++		user->limit += EXTRA_CONTEXT_SIZE;
++		ret = __sigframe_alloc(user, &user->extra_offset,
++				       sizeof(struct extra_context), false);
++		if (ret) {
++			user->limit -= EXTRA_CONTEXT_SIZE;
++			return ret;
++		}
++
++		/* Reserve space for the __reserved[] terminator */
++		user->size += TERMINATOR_SIZE;
++
++		/*
++		 * Allow expansion up to SIGFRAME_MAXSZ, ensuring space for
++		 * the terminator:
++		 */
++		user->limit = SIGFRAME_MAXSZ - TERMINATOR_SIZE;
++	}
++
++	/* Still not enough space?  Bad luck! */
++	if (padded_size > user->limit - user->size)
++		return -ENOMEM;
++
++	*offset = user->size;
++	user->size += padded_size;
++
++	return 0;
++}
++
++/*
++ * Allocate space for an optional record of <size> bytes in the user
++ * signal frame.  The offset from the signal frame base address to the
++ * allocated block is assigned to *offset.
++ */
++static int sigframe_alloc(struct rt_sigframe_user_layout *user,
++			  unsigned long *offset, size_t size)
++{
++	return __sigframe_alloc(user, offset, size, true);
++}
++
++/* Allocate the null terminator record and prevent further allocations */
++static int sigframe_alloc_end(struct rt_sigframe_user_layout *user)
++{
++	int ret;
++
++	/* Un-reserve the space reserved for the terminator: */
++	user->limit += TERMINATOR_SIZE;
++
++	ret = sigframe_alloc(user, &user->end_offset,
++			     sizeof(struct _aarch64_ctx));
++	if (ret)
++		return ret;
++
++	/* Prevent further allocation: */
++	user->limit = user->size;
++	return 0;
++}
++
++static void __user *apply_user_offset(
++	struct rt_sigframe_user_layout const *user, unsigned long offset)
++{
++	char __user *base = (char __user *)user->sigframe;
++
++	return base + offset;
++}
++
++static int preserve_fpsimd_context(struct fpsimd_context __user *ctx)
++{
++	struct user_fpsimd_state const *fpsimd =
++		&current->thread.uw.fpsimd_state;
++	int err;
++
++	/* copy the FP and status/control registers */
++	err = __copy_to_user(ctx->vregs, fpsimd->vregs, sizeof(fpsimd->vregs));
++	__put_user_error(fpsimd->fpsr, &ctx->fpsr, err);
++	__put_user_error(fpsimd->fpcr, &ctx->fpcr, err);
++
++	/* copy the magic/size information */
++	__put_user_error(FPSIMD_MAGIC, &ctx->head.magic, err);
++	__put_user_error(sizeof(struct fpsimd_context), &ctx->head.size, err);
++
++	return err ? -EFAULT : 0;
++}
++
++static int restore_fpsimd_context(struct fpsimd_context __user *ctx)
++{
++	struct user_fpsimd_state fpsimd;
++	__u32 magic, size;
++	int err = 0;
++
++	/* check the magic/size information */
++	__get_user_error(magic, &ctx->head.magic, err);
++	__get_user_error(size, &ctx->head.size, err);
++	if (err)
++		return -EFAULT;
++	if (magic != FPSIMD_MAGIC || size != sizeof(struct fpsimd_context))
++		return -EINVAL;
++
++	/* copy the FP and status/control registers */
++	err = __copy_from_user(fpsimd.vregs, ctx->vregs,
++			       sizeof(fpsimd.vregs));
++	__get_user_error(fpsimd.fpsr, &ctx->fpsr, err);
++	__get_user_error(fpsimd.fpcr, &ctx->fpcr, err);
++
++	clear_thread_flag(TIF_SVE);
++
++	/* load the hardware registers from the fpsimd_state structure */
++	if (!err)
++		fpsimd_update_current_state(&fpsimd);
++
++	return err ? -EFAULT : 0;
++}
++
++
++struct user_ctxs {
++	struct fpsimd_context __user *fpsimd;
++	struct sve_context __user *sve;
++};
++
++#ifdef CONFIG_ARM64_SVE
++
++static int preserve_sve_context(struct sve_context __user *ctx)
++{
++	int err = 0;
++	u16 reserved[ARRAY_SIZE(ctx->__reserved)];
++	unsigned int vl = current->thread.sve_vl;
++	unsigned int vq = 0;
++
++	if (test_thread_flag(TIF_SVE))
++		vq = sve_vq_from_vl(vl);
++
++	memset(reserved, 0, sizeof(reserved));
++
++	__put_user_error(SVE_MAGIC, &ctx->head.magic, err);
++	__put_user_error(round_up(SVE_SIG_CONTEXT_SIZE(vq), 16),
++			 &ctx->head.size, err);
++	__put_user_error(vl, &ctx->vl, err);
++	BUILD_BUG_ON(sizeof(ctx->__reserved) != sizeof(reserved));
++	err |= __copy_to_user(&ctx->__reserved, reserved, sizeof(reserved));
++
++	if (vq) {
++		/*
++		 * This assumes that the SVE state has already been saved to
++		 * the task struct by calling preserve_fpsimd_context().
++		 */
++		err |= __copy_to_user((char __user *)ctx + SVE_SIG_REGS_OFFSET,
++				      current->thread.sve_state,
++				      SVE_SIG_REGS_SIZE(vq));
++	}
++
++	return err ? -EFAULT : 0;
++}
++
++static int restore_sve_fpsimd_context(struct user_ctxs *user)
++{
++	int err;
++	unsigned int vq;
++	struct user_fpsimd_state fpsimd;
++	struct sve_context sve;
++
++	if (__copy_from_user(&sve, user->sve, sizeof(sve)))
++		return -EFAULT;
++
++	if (sve.vl != current->thread.sve_vl)
++		return -EINVAL;
++
++	if (sve.head.size <= sizeof(*user->sve)) {
++		clear_thread_flag(TIF_SVE);
++		goto fpsimd_only;
++	}
++
++	vq = sve_vq_from_vl(sve.vl);
++
++	if (sve.head.size < SVE_SIG_CONTEXT_SIZE(vq))
++		return -EINVAL;
++
++	/*
++	 * Careful: we are about __copy_from_user() directly into
++	 * thread.sve_state with preemption enabled, so protection is
++	 * needed to prevent a racing context switch from writing stale
++	 * registers back over the new data.
++	 */
++
++	fpsimd_flush_task_state(current);
++	/* From now, fpsimd_thread_switch() won't touch thread.sve_state */
++
++	sve_alloc(current);
++	err = __copy_from_user(current->thread.sve_state,
++			       (char __user const *)user->sve +
++					SVE_SIG_REGS_OFFSET,
++			       SVE_SIG_REGS_SIZE(vq));
++	if (err)
++		return -EFAULT;
++
++	set_thread_flag(TIF_SVE);
++
++fpsimd_only:
++	/* copy the FP and status/control registers */
++	/* restore_sigframe() already checked that user->fpsimd != NULL. */
++	err = __copy_from_user(fpsimd.vregs, user->fpsimd->vregs,
++			       sizeof(fpsimd.vregs));
++	__get_user_error(fpsimd.fpsr, &user->fpsimd->fpsr, err);
++	__get_user_error(fpsimd.fpcr, &user->fpsimd->fpcr, err);
++
++	/* load the hardware registers from the fpsimd_state structure */
++	if (!err)
++		fpsimd_update_current_state(&fpsimd);
++
++	return err ? -EFAULT : 0;
++}
++
++#else /* ! CONFIG_ARM64_SVE */
++
++/* Turn any non-optimised out attempts to use these into a link error: */
++extern int preserve_sve_context(void __user *ctx);
++extern int restore_sve_fpsimd_context(struct user_ctxs *user);
++
++#endif /* ! CONFIG_ARM64_SVE */
++
++
++static int parse_user_sigframe(struct user_ctxs *user,
++			       struct rt_sigframe __user *sf)
++{
++	struct sigcontext __user *const sc = &sf->uc.uc_mcontext;
++	struct _aarch64_ctx __user *head;
++	char __user *base = (char __user *)&sc->__reserved;
++	size_t offset = 0;
++	size_t limit = sizeof(sc->__reserved);
++	bool have_extra_context = false;
++	char const __user *const sfp = (char const __user *)sf;
++
++	user->fpsimd = NULL;
++	user->sve = NULL;
++
++	if (!IS_ALIGNED((unsigned long)base, 16))
++		goto invalid;
++
++	while (1) {
++		int err = 0;
++		u32 magic, size;
++		char const __user *userp;
++		struct extra_context const __user *extra;
++		u64 extra_datap;
++		u32 extra_size;
++		struct _aarch64_ctx const __user *end;
++		u32 end_magic, end_size;
++
++		if (limit - offset < sizeof(*head))
++			goto invalid;
++
++		if (!IS_ALIGNED(offset, 16))
++			goto invalid;
++
++		head = (struct _aarch64_ctx __user *)(base + offset);
++		__get_user_error(magic, &head->magic, err);
++		__get_user_error(size, &head->size, err);
++		if (err)
++			return err;
++
++		if (limit - offset < size)
++			goto invalid;
++
++		switch (magic) {
++		case 0:
++			if (size)
++				goto invalid;
++
++			goto done;
++
++		case FPSIMD_MAGIC:
++			if (user->fpsimd)
++				goto invalid;
++
++			if (size < sizeof(*user->fpsimd))
++				goto invalid;
++
++			user->fpsimd = (struct fpsimd_context __user *)head;
++			break;
++
++		case ESR_MAGIC:
++			/* ignore */
++			break;
++
++		case SVE_MAGIC:
++			if (!system_supports_sve())
++				goto invalid;
++
++			if (user->sve)
++				goto invalid;
++
++			if (size < sizeof(*user->sve))
++				goto invalid;
++
++			user->sve = (struct sve_context __user *)head;
++			break;
++
++		case EXTRA_MAGIC:
++			if (have_extra_context)
++				goto invalid;
++
++			if (size < sizeof(*extra))
++				goto invalid;
++
++			userp = (char const __user *)head;
++
++			extra = (struct extra_context const __user *)userp;
++			userp += size;
++
++			__get_user_error(extra_datap, &extra->datap, err);
++			__get_user_error(extra_size, &extra->size, err);
++			if (err)
++				return err;
++
++			/* Check for the dummy terminator in __reserved[]: */
++
++			if (limit - offset - size < TERMINATOR_SIZE)
++				goto invalid;
++
++			end = (struct _aarch64_ctx const __user *)userp;
++			userp += TERMINATOR_SIZE;
++
++			__get_user_error(end_magic, &end->magic, err);
++			__get_user_error(end_size, &end->size, err);
++			if (err)
++				return err;
++
++			if (end_magic || end_size)
++				goto invalid;
++
++			/* Prevent looping/repeated parsing of extra_context */
++			have_extra_context = true;
++
++			base = (__force void __user *)extra_datap;
++			if (!IS_ALIGNED((unsigned long)base, 16))
++				goto invalid;
++
++			if (!IS_ALIGNED(extra_size, 16))
++				goto invalid;
++
++			if (base != userp)
++				goto invalid;
++
++			/* Reject "unreasonably large" frames: */
++			if (extra_size > sfp + SIGFRAME_MAXSZ - userp)
++				goto invalid;
++
++			/*
++			 * Ignore trailing terminator in __reserved[]
++			 * and start parsing extra data:
++			 */
++			offset = 0;
++			limit = extra_size;
++
++			if (!access_ok(base, limit))
++				goto invalid;
++
++			continue;
++
++		default:
++			goto invalid;
++		}
++
++		if (size < sizeof(*head))
++			goto invalid;
++
++		if (limit - offset < size)
++			goto invalid;
++
++		offset += size;
++	}
++
++done:
++	return 0;
++
++invalid:
++	return -EINVAL;
++}
++
++static int restore_sigframe(struct pt_regs *regs,
++			    struct rt_sigframe __user *sf)
++{
++	sigset_t set;
++	int i, err;
++	struct user_ctxs user;
++
++	err = get_sigset(&set, &sf->uc.uc_sigmask);
++	if (err == 0)
++		set_current_blocked(&set);
++
++	for (i = 0; i < 31; i++)
++		__get_user_error(regs->regs[i], &sf->uc.uc_mcontext.regs[i],
++				 err);
++	__get_user_error(regs->sp, &sf->uc.uc_mcontext.sp, err);
++	__get_user_error(regs->pc, &sf->uc.uc_mcontext.pc, err);
++	__get_user_error(regs->pstate, &sf->uc.uc_mcontext.pstate, err);
++
++	/*
++	 * Avoid sys_rt_sigreturn() restarting.
++	 */
++	forget_syscall(regs);
++
++	err |= !valid_user_regs(&regs->user_regs, current);
++	if (err == 0)
++		err = parse_user_sigframe(&user, sf);
++
++	if (err == 0) {
++		if (!user.fpsimd)
++			return -EINVAL;
++
++		if (user.sve) {
++			if (!system_supports_sve())
++				return -EINVAL;
++
++			err = restore_sve_fpsimd_context(&user);
++		} else {
++			err = restore_fpsimd_context(user.fpsimd);
++		}
++	}
++
++	return err;
++}
++
++COMPAT_SYSCALL_DEFINE0(ilp32_rt_sigreturn)
++{
++	struct pt_regs *regs = current_pt_regs();
++	struct rt_sigframe __user *frame;
++
++	/* Always make any pending restarted system calls return -EINTR */
++	current->restart_block.fn = do_no_restart_syscall;
++
++	/*
++	 * Since we stacked the signal on a 128-bit boundary, then 'sp' should
++	 * be word aligned here.
++	 */
++	if (regs->sp & 15)
++		goto badframe;
++
++	frame = (struct rt_sigframe __user *)regs->sp;
++
++	if (!access_ok(frame, sizeof (*frame)))
++		goto badframe;
++
++	if (restore_sigframe(regs, frame))
++		goto badframe;
++
++	if (compat_restore_altstack(&frame->uc.uc_stack))
++		goto badframe;
++
++	return regs->regs[0];
++
++badframe:
++	arm64_notify_segfault(regs->sp);
++	return 0;
++}
++
++/*
++ * Determine the layout of optional records in the signal frame
++ *
++ * add_all: if true, lays out the biggest possible signal frame for
++ *	this task; otherwise, generates a layout for the current state
++ *	of the task.
++ */
++static int setup_sigframe_layout(struct rt_sigframe_user_layout *user,
++				 bool add_all)
++{
++	int err;
++
++	err = sigframe_alloc(user, &user->fpsimd_offset,
++			     sizeof(struct fpsimd_context));
++	if (err)
++		return err;
++
++	/* fault information, if valid */
++	if (add_all || current->thread.fault_code) {
++		err = sigframe_alloc(user, &user->esr_offset,
++				     sizeof(struct esr_context));
++		if (err)
++			return err;
++	}
++
++	if (system_supports_sve()) {
++		unsigned int vq = 0;
++
++		if (add_all || test_thread_flag(TIF_SVE)) {
++			int vl = sve_max_vl;
++
++			if (!add_all)
++				vl = current->thread.sve_vl;
++
++			vq = sve_vq_from_vl(vl);
++		}
++
++		err = sigframe_alloc(user, &user->sve_offset,
++				     SVE_SIG_CONTEXT_SIZE(vq));
++		if (err)
++			return err;
++	}
++
++	return sigframe_alloc_end(user);
++}
++
++static int setup_sigframe(struct rt_sigframe_user_layout *user,
++			  struct pt_regs *regs, sigset_t *set)
++{
++	int i, err = 0;
++	struct rt_sigframe __user *sf = user->sigframe;
++
++	/* set up the stack frame for unwinding */
++	__put_user_error(regs->regs[29], &user->next_frame->fp, err);
++	__put_user_error(regs->regs[30], &user->next_frame->lr, err);
++
++	for (i = 0; i < 31; i++)
++		__put_user_error(regs->regs[i], &sf->uc.uc_mcontext.regs[i],
++				 err);
++	__put_user_error(regs->sp, &sf->uc.uc_mcontext.sp, err);
++	__put_user_error(regs->pc, &sf->uc.uc_mcontext.pc, err);
++	__put_user_error(regs->pstate, &sf->uc.uc_mcontext.pstate, err);
++
++	__put_user_error(current->thread.fault_address, &sf->uc.uc_mcontext.fault_address, err);
++
++	err |= put_sigset(set, &sf->uc.uc_sigmask);
++
++	if (err == 0) {
++		struct fpsimd_context __user *fpsimd_ctx =
++			apply_user_offset(user, user->fpsimd_offset);
++		err |= preserve_fpsimd_context(fpsimd_ctx);
++	}
++
++	/* fault information, if valid */
++	if (err == 0 && user->esr_offset) {
++		struct esr_context __user *esr_ctx =
++			apply_user_offset(user, user->esr_offset);
++
++		__put_user_error(ESR_MAGIC, &esr_ctx->head.magic, err);
++		__put_user_error(sizeof(*esr_ctx), &esr_ctx->head.size, err);
++		__put_user_error(current->thread.fault_code, &esr_ctx->esr, err);
++	}
++
++	/* Scalable Vector Extension state, if present */
++	if (system_supports_sve() && err == 0 && user->sve_offset) {
++		struct sve_context __user *sve_ctx =
++			apply_user_offset(user, user->sve_offset);
++		err |= preserve_sve_context(sve_ctx);
++	}
++
++	if (err == 0 && user->extra_offset) {
++		char __user *sfp = (char __user *)user->sigframe;
++		char __user *userp =
++			apply_user_offset(user, user->extra_offset);
++
++		struct extra_context __user *extra;
++		struct _aarch64_ctx __user *end;
++		u64 extra_datap;
++		u32 extra_size;
++
++		extra = (struct extra_context __user *)userp;
++		userp += EXTRA_CONTEXT_SIZE;
++
++		end = (struct _aarch64_ctx __user *)userp;
++		userp += TERMINATOR_SIZE;
++
++		/*
++		 * extra_datap is just written to the signal frame.
++		 * The value gets cast back to a void __user *
++		 * during sigreturn.
++		 */
++		extra_datap = (__force u64)userp;
++		extra_size = sfp + round_up(user->size, 16) - userp;
++
++		__put_user_error(EXTRA_MAGIC, &extra->head.magic, err);
++		__put_user_error(EXTRA_CONTEXT_SIZE, &extra->head.size, err);
++		__put_user_error(extra_datap, &extra->datap, err);
++		__put_user_error(extra_size, &extra->size, err);
++
++		/* Add the terminator */
++		__put_user_error(0, &end->magic, err);
++		__put_user_error(0, &end->size, err);
++	}
++
++	/* set the "end" magic */
++	if (err == 0) {
++		struct _aarch64_ctx __user *end =
++			apply_user_offset(user, user->end_offset);
++
++		__put_user_error(0, &end->magic, err);
++		__put_user_error(0, &end->size, err);
++	}
++
++	return err;
++}
++
++static int get_sigframe(struct rt_sigframe_user_layout *user,
++			 struct ksignal *ksig, struct pt_regs *regs)
++{
++	unsigned long sp, sp_top;
++	int err;
++
++	init_user_layout(user);
++	err = setup_sigframe_layout(user, false);
++	if (err)
++		return err;
++
++	sp = sp_top = sigsp(regs->sp, ksig);
++
++	sp = round_down(sp - sizeof(struct frame_record), 16);
++	user->next_frame = (struct frame_record __user *)sp;
++
++	sp = round_down(sp, 16) - sigframe_size(user);
++	user->sigframe = (void __user *)sp;
++
++	/*
++	 * Check that we can actually write to the signal frame.
++	 */
++	if (!access_ok(user->sigframe, sp_top - sp))
++		return -EFAULT;
++
++	return 0;
++}
++
++static void setup_return(struct pt_regs *regs, struct k_sigaction *ka,
++			 struct rt_sigframe_user_layout *user, int usig)
++{
++	__sigrestore_t sigtramp;
++
++	regs->regs[0] = usig;
++	regs->sp = (unsigned long)user->sigframe;
++	regs->regs[29] = (unsigned long)&user->next_frame->fp;
++	regs->pc = (unsigned long)ka->sa.sa_handler;
++
++	// FIXME: What's needed here?
++	if (ka->sa.sa_flags & SA_RESTORER) {
++		BUG();
++		sigtramp = ka->sa.sa_restorer;
++	} else
++		sigtramp = VDSO_SYMBOL(current->mm->context.vdso, sigtramp_ilp32);
++
++	regs->regs[30] = (unsigned long)sigtramp;
++}
++
++int ilp32_setup_rt_frame(int usig, struct ksignal *ksig, sigset_t *set,
++			  struct pt_regs *regs)
++{
++	struct rt_sigframe_user_layout user;
++	struct rt_sigframe __user *frame;
++	int err = 0;
++
++	fpsimd_signal_preserve_current_state();
++
++	if (get_sigframe(&user, ksig, regs))
++		return 1;
++
++	frame = user.sigframe;
++
++	__put_user_error(0, &frame->uc.uc_flags, err);
++	__put_user_error((typeof(frame->uc.uc_link)) 0, &frame->uc.uc_link, err);
++
++	err |= __compat_save_altstack(&frame->uc.uc_stack, regs->sp);
++	err |= setup_sigframe(&user, regs, set);
++	if (err == 0) {
++		setup_return(regs, &ksig->ka, &user, usig);
++		if (ksig->ka.sa.sa_flags & SA_SIGINFO) {
++			err |= copy_siginfo_to_user32(&frame->info, &ksig->info);
++			regs->regs[1] = (unsigned long)&frame->info;
++			regs->regs[2] = (unsigned long)&frame->uc;
++		}
++	}
++
++	return err;
++}
+diff --git a/arch/arm64/kernel/sys_ilp32.c b/arch/arm64/kernel/sys_ilp32.c
+new file mode 100644
+index 000000000000..6a52eb4393f8
+--- /dev/null
++++ b/arch/arm64/kernel/sys_ilp32.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * arch/arm64/kernel/sys_ilp32.c
++ *
++ * Copyright (C) 2015 ARM Ltd.
++ */
++
++#define __SYSCALL_COMPAT
++
++#include <linux/compat.h>
++#include <linux/compiler.h>
++#include <linux/syscalls.h>
++
++#include <asm/syscall.h>
++
++/*
++ * AARCH32 requires 4-page alignment for shared memory,
++ * but AARCH64 - only 1 page. This is the only difference
++ * between compat and native sys_shmat(). So ILP32 just pick
++ * AARCH64 version.
++ */
++#define __arm64_compat_sys_shmat		__arm64_sys_shmat
++
++/*
++ * ILP32 needs special handling for some ptrace requests.
++ */
++#define __arm64_sys_ptrace			__arm64_compat_sys_ptrace
++
++/*
++ * Using AARCH32 interface for syscalls that take 64-bit
++ * parameters in registers.
++ */
++#define __arm64_compat_sys_fadvise64_64		__arm64_compat_sys_aarch32_fadvise64_64
++#define __arm64_compat_sys_fallocate		__arm64_compat_sys_aarch32_fallocate
++#define __arm64_compat_sys_ftruncate64		__arm64_compat_sys_aarch32_ftruncate64
++#define __arm64_compat_sys_pread64		__arm64_compat_sys_aarch32_pread64
++#define __arm64_compat_sys_pwrite64		__arm64_compat_sys_aarch32_pwrite64
++#define __arm64_compat_sys_readahead		__arm64_compat_sys_aarch32_readahead
++#define __arm64_compat_sys_sync_file_range2	__arm64_compat_sys_aarch32_sync_file_range2
++#define __arm64_compat_sys_truncate64		__arm64_compat_sys_aarch32_truncate64
++#define __arm64_sys_mmap2			__arm64_compat_sys_aarch32_mmap2
++
++/*
++ * Using AARCH32 interface for syscalls that take the size of
++ * struct statfs as an argument, as it's calculated differently
++ * in kernel and user spaces.
++ */
++#define __arm64_compat_sys_fstatfs64		__arm64_compat_sys_aarch32_fstatfs64
++#define __arm64_compat_sys_statfs64		__arm64_compat_sys_aarch32_statfs64
++
++/*
++ * Using old interface for IPC syscalls that should handle IPC_64 flag.
++ */
++#define __arm64_compat_sys_semctl		__arm64_compat_sys_old_semctl
++#define __arm64_compat_sys_msgctl		__arm64_compat_sys_old_msgctl
++#define __arm64_compat_sys_shmctl		__arm64_compat_sys_old_shmctl
++
++#define __arm64_compat_sys_rt_sigreturn		__arm64_compat_sys_ilp32_rt_sigreturn
++
++/*
++ * Wrappers to pass the pt_regs argument.
++ */
++#define sys_personality		sys_arm64_personality
++
++#undef __SYSCALL
++#define __SYSCALL(nr, sym)	asmlinkage long __arm64_##sym(const struct pt_regs *);
++#include <asm/unistd.h>
++
++#undef __SYSCALL
++#define __SYSCALL(nr, sym)	[nr] = __arm64_##sym,
++
++const syscall_fn_t ilp32_sys_call_table[__NR_syscalls] = {
++	[0 ... __NR_syscalls - 1] = __arm64_sys_ni_syscall,
++#include <asm/unistd.h>
++};
+diff --git a/arch/arm64/kernel/syscall.c b/arch/arm64/kernel/syscall.c
+index 871c739f060a..c00545fb898b 100644
+--- a/arch/arm64/kernel/syscall.c
++++ b/arch/arm64/kernel/syscall.c
+@@ -156,8 +156,22 @@ static inline void sve_user_discard(void)
+ 
+ asmlinkage void el0_svc_handler(struct pt_regs *regs)
+ {
++	const syscall_fn_t *table = sys_call_table;
++
++	if (unlikely(is_ilp32_task())) {
++		table = ilp32_sys_call_table;
++		regs->regs[0] &= UINT_MAX;
++		regs->regs[1] &= UINT_MAX;
++		regs->regs[2] &= UINT_MAX;
++		regs->regs[3] &= UINT_MAX;
++		regs->regs[4] &= UINT_MAX;
++		regs->regs[5] &= UINT_MAX;
++		regs->regs[6] &= UINT_MAX;
++		regs->regs[7] &= UINT_MAX;
++	}
++
+ 	sve_user_discard();
+-	el0_svc_common(regs, regs->regs[8], __NR_syscalls, sys_call_table);
++	el0_svc_common(regs, regs->regs[8], __NR_syscalls, table);
+ }
+ 
+ #ifdef CONFIG_COMPAT
+diff --git a/arch/arm64/kernel/vdso.c b/arch/arm64/kernel/vdso.c
+index 354b11e27c07..5c9d9021ffb7 100644
+--- a/arch/arm64/kernel/vdso.c
++++ b/arch/arm64/kernel/vdso.c
+@@ -32,19 +32,17 @@ extern char vdso_start[], vdso_end[];
+ #ifdef CONFIG_COMPAT_VDSO
+ extern char vdso32_start[], vdso32_end[];
+ #endif /* CONFIG_COMPAT_VDSO */
++#ifdef CONFIG_ARM64_ILP32_VDSO
++extern char vdso_ilp32_start[], vdso_ilp32_end[];
++#endif /* CONFIG_ARM64_ILP32_VDSO */
+ 
+ /* vdso_lookup arch_index */
+ enum arch_vdso_type {
+ 	ARM64_VDSO = 0,
+-#ifdef CONFIG_COMPAT_VDSO
+-	ARM64_VDSO32 = 1,
+-#endif /* CONFIG_COMPAT_VDSO */
++	ARM64_VDSO32,
++	ARM64_ILP32_VDSO,
++	VDSO_TYPES
+ };
+-#ifdef CONFIG_COMPAT_VDSO
+-#define VDSO_TYPES		(ARM64_VDSO32 + 1)
+-#else
+-#define VDSO_TYPES		(ARM64_VDSO + 1)
+-#endif /* CONFIG_COMPAT_VDSO */
+ 
+ struct __vdso_abi {
+ 	const char *name;
+@@ -63,13 +61,20 @@ static struct __vdso_abi vdso_lookup[VDSO_TYPES] __ro_after_init = {
+ 		.vdso_code_start = vdso_start,
+ 		.vdso_code_end = vdso_end,
+ 	},
+-#ifdef CONFIG_COMPAT_VDSO
+ 	{
+ 		.name = "vdso32",
++#ifdef CONFIG_COMPAT_VDSO
+ 		.vdso_code_start = vdso32_start,
+ 		.vdso_code_end = vdso32_end,
+-	},
+ #endif /* CONFIG_COMPAT_VDSO */
++	},
++	{
++		.name = "vdso_ilp32",
++#ifdef CONFIG_ARM64_ILP32_VDSO
++		.vdso_code_start = vdso_ilp32_start,
++		.vdso_code_end = vdso_ilp32_end,
++#endif /* CONFIG_ARM64_ILP32_VDSO */
++	},
+ };
+ 
+ /*
+@@ -97,6 +102,16 @@ static int __vdso_remap(enum arch_vdso_type arch_index,
+ 	return 0;
+ }
+ 
++static void vdso_print_info(const struct __vdso_abi *p)
++{
++	pr_info("vdso: %ld pages (%ld code @ %p, %ld data @ %p)\n",
++		p->vdso_pages + 1,
++		p->vdso_pages,
++		p->vdso_code_start,
++		1L,
++		vdso_data);
++}
++
+ static int __vdso_init(enum arch_vdso_type arch_index)
+ {
+ 	int i;
+@@ -113,6 +128,8 @@ static int __vdso_init(enum arch_vdso_type arch_index)
+ 			vdso_lookup[arch_index].vdso_code_start) >>
+ 			PAGE_SHIFT;
+ 
++	vdso_print_info(&vdso_lookup[arch_index]);
++
+ 	/* Allocate the vDSO pagelist, plus a page for the data. */
+ 	vdso_pagelist = kcalloc(vdso_lookup[arch_index].vdso_pages + 1,
+ 				sizeof(struct page *),
+@@ -379,6 +396,44 @@ int aarch32_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+ }
+ #endif /* CONFIG_COMPAT */
+ 
++
++#if defined(CONFIG_ARM64_ILP32_VDSO)
++static int ilp32_vdso_mremap(const struct vm_special_mapping *sm,
++		struct vm_area_struct *new_vma)
++{
++	return __vdso_remap(ARM64_ILP32_VDSO, sm, new_vma);
++}
++
++static int __init ilp32_vdso_init(void)
++{
++/*
++ * ilp32_vdso_pages:
++ * 0 - vvar
++ * 1 - vdso
++ */
++#define ILP32_VVAR		0
++#define ILP32_VDSO		1
++#define ILP32_PAGES		(ILP32_VDSO + 1)
++
++	static struct vm_special_mapping ilp32_vdso_spec[ILP32_PAGES] __ro_after_init = {
++		{
++			.name	= "[vvar]",
++		},
++		{
++			.name	= "[vdso]",
++			.mremap = ilp32_vdso_mremap,
++		},
++	};
++
++	vdso_lookup[ARM64_ILP32_VDSO].dm = &ilp32_vdso_spec[ILP32_VVAR];
++	vdso_lookup[ARM64_ILP32_VDSO].cm = &ilp32_vdso_spec[ILP32_VDSO];
++
++	return __vdso_init(ARM64_ILP32_VDSO);
++}
++
++arch_initcall(ilp32_vdso_init);
++#endif /* CONFIG_ARM64_ILP32_VDSO */
++
+ static int vdso_mremap(const struct vm_special_mapping *sm,
+ 		struct vm_area_struct *new_vma)
+ {
+@@ -421,10 +476,17 @@ int arch_setup_additional_pages(struct linux_binprm *bprm,
+ 	if (down_write_killable(&mm->mmap_sem))
+ 		return -EINTR;
+ 
+-	ret = __setup_additional_pages(ARM64_VDSO,
++	if (is_ilp32_task()) {
++		ret = __setup_additional_pages(ARM64_ILP32_VDSO,
+ 				       mm,
+ 				       bprm,
+ 				       uses_interp);
++	} else {
++		ret = __setup_additional_pages(ARM64_VDSO,
++				       mm,
++				       bprm,
++				       uses_interp);
++	}
+ 
+ 	up_write(&mm->mmap_sem);
+ 
+diff --git a/arch/arm64/kernel/vdso/Makefile b/arch/arm64/kernel/vdso/Makefile
+index dd2514bb1511..6f6b55c12029 100644
+--- a/arch/arm64/kernel/vdso/Makefile
++++ b/arch/arm64/kernel/vdso/Makefile
+@@ -23,8 +23,6 @@ ldflags-y := -shared -nostdlib -soname=linux-vdso.so.1 --hash-style=sysv \
+ ccflags-y := -fno-common -fno-builtin -fno-stack-protector -ffixed-x18
+ ccflags-y += -DDISABLE_BRANCH_PROFILING
+ 
+-VDSO_LDFLAGS := -Bsymbolic
+-
+ CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE) -Os
+ KBUILD_CFLAGS			+= $(DISABLE_LTO)
+ KASAN_SANITIZE			:= n
+diff --git a/arch/arm64/kernel/vdso_ilp32/Makefile b/arch/arm64/kernel/vdso_ilp32/Makefile
+new file mode 100644
+index 000000000000..d46e5c8f4b93
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/Makefile
+@@ -0,0 +1,108 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Building a vDSO image for AArch64.
++#
++# Author: Will Deacon <will.deacon@arm.com>
++# Heavily based on the vDSO Makefiles for other archs.
++#
++
++# Absolute relocation type $(ARCH_REL_TYPE_ABS) needs to be defined before
++# the inclusion of generic Makefile.
++ARCH_REL_TYPE_ABS := R_AARCH64_P32_JUMP_SLOT|R_AARCH64_P32_GLOB_DAT|R_AARCH64_P32_ABS32
++include $(srctree)/lib/vdso/Makefile
++
++obj-vdso := vgettimeofday.o note.o sigreturn.o
++
++# Build rules
++targets := $(obj-vdso) vdso.so vdso.so.dbg
++obj-vdso := $(addprefix $(obj)/, $(obj-vdso))
++
++KBUILD_LDFLAGS := -EL -maarch64elf32
++
++ldflags-y := -shared -nostdlib -soname=linux-vdso.so.1 --hash-style=sysv \
++		--build-id -n -T
++
++ccflags-y := -fno-common -fno-builtin -fno-stack-protector -ffixed-x18
++ccflags-y += -DDISABLE_BRANCH_PROFILING
++
++CFLAGS_REMOVE_ALL = \
++	-fstack-protector \
++	-fstack-protector-strong \
++	-mabi=lp64 \
++	$(CC_FLAGS_FTRACE) \
++	 -Os
++
++CFLAGS_ADD_ALL = \
++	-mabi=ilp32 \
++	-nostdlib \
++	-Wno-int-to-pointer-cast \
++	-Wno-shift-count-overflow
++
++CFLAGS_REMOVE_vgettimeofday.o += $(CFLAGS_REMOVE_ALL)
++
++CFLAGS_REMOVE_note.o += $(CFLAGS_REMOVE_ALL)
++CFLAGS_note.o += $(CFLAGS_ADD_ALL)
++
++AFLAGS_REMOVE_sigreturn.o += $(CFLAGS_REMOVE_ALL)
++AFLAGS_sigreturn.o += $(CFLAGS_ADD_ALL)
++
++KBUILD_CFLAGS			+= $(DISABLE_LTO)
++KASAN_SANITIZE			:= n
++UBSAN_SANITIZE			:= n
++OBJECT_FILES_NON_STANDARD	:= y
++KCOV_INSTRUMENT			:= n
++
++CFLAGS_vgettimeofday.o = -O2 -mcmodel=tiny
++CFLAGS_vgettimeofday.o += $(CFLAGS_ADD_ALL)
++
++ifneq ($(c-gettimeofday-y),)
++  CFLAGS_vgettimeofday.o += -include $(c-gettimeofday-y)
++endif
++
++# Clang versions less than 8 do not support -mcmodel=tiny
++ifeq ($(CONFIG_CC_IS_CLANG), y)
++  ifeq ($(shell test $(CONFIG_CLANG_VERSION) -lt 80000; echo $$?),0)
++    CFLAGS_REMOVE_vgettimeofday.o += -mcmodel=tiny
++  endif
++endif
++
++# Disable gcov profiling for VDSO code
++GCOV_PROFILE := n
++
++obj-y += vdso.o
++extra-y += vdso.lds
++CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
++
++# Force dependency (incbin is bad)
++$(obj)/vdso.o : $(obj)/vdso.so
++
++# Link rule for the .so file, .lds has to be first
++$(obj)/vdso.so.dbg: $(obj)/vdso.lds $(obj-vdso) FORCE
++	$(call if_changed,vdsold_and_vdso_check)
++
++# Strip rule for the .so file
++$(obj)/%.so: OBJCOPYFLAGS := -S
++$(obj)/%.so: $(obj)/%.so.dbg FORCE
++	$(call if_changed,objcopy)
++
++# Generate VDSO offsets using helper script
++gen-vdsosym := $(srctree)/$(src)/gen_vdso_offsets.sh
++quiet_cmd_vdsosym = VDSOSYM $@
++      cmd_vdsosym = $(NM) $< | $(gen-vdsosym) | LC_ALL=C sort > $@
++
++include/generated/vdso-ilp32-offsets.h: $(obj)/vdso.so.dbg FORCE
++	$(call if_changed,vdsosym)
++
++# Actual build commands
++quiet_cmd_vdsold_and_vdso_check = LD      $@
++      cmd_vdsold_and_vdso_check = $(cmd_ld); $(cmd_vdso_check)
++
++# Install commands for the unstripped file
++quiet_cmd_vdso_install = INSTALL $@
++      cmd_vdso_install = cp $(obj)/vdso.so.dbg $(MODLIB)/vdso/$@
++
++vdso_ilp32.so: $(obj)/vdso.so.dbg
++	@mkdir -p $(MODLIB)/vdso
++	$(call cmd,vdso_install)
++
++vdso_install: vdso_ilp32.so
+diff --git a/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh b/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh
+new file mode 100755
+index 000000000000..0664acaf61ff
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/gen_vdso_offsets.sh
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0
++
++#
++# Match symbols in the DSO that look like VDSO_*; produce a header file
++# of constant offsets into the shared object.
++#
++# Doing this inside the Makefile will break the $(filter-out) function,
++# causing Kbuild to rebuild the vdso-offsets header file every time.
++#
++# Author: Will Deacon <will.deacon@arm.com
++#
++
++LC_ALL=C
++sed -n -e 's/^00*/0/' -e \
++'s/^\([0-9a-fA-F]*\) . VDSO_\([a-zA-Z0-9_]*\)$/\#define vdso_offset_\2\t0x\1/p'
+diff --git a/arch/arm64/kernel/vdso_ilp32/note.c b/arch/arm64/kernel/vdso_ilp32/note.c
+new file mode 100644
+index 000000000000..be84ec23b7d7
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/note.c
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2012-2018 ARM Limited
++ *
++ * This supplies .note.* sections to go into the PT_NOTE inside the vDSO text.
++ * Here we can supply some information useful to userland.
++ */
++
++#include <linux/uts.h>
++#include <linux/version.h>
++#include <linux/elfnote.h>
++#include <linux/build-salt.h>
++
++ELFNOTE64("Linux", 0, LINUX_VERSION_CODE);
++BUILD_SALT;
+diff --git a/arch/arm64/kernel/vdso_ilp32/sigreturn.S b/arch/arm64/kernel/vdso_ilp32/sigreturn.S
+new file mode 100644
+index 000000000000..0723aa398d6e
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/sigreturn.S
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Sigreturn trampoline for returning from a signal when the SA_RESTORER
++ * flag is not set.
++ *
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ */
++
++#include <linux/linkage.h>
++#include <asm/unistd.h>
++
++	.text
++
++	nop
++ENTRY(__kernel_rt_sigreturn)
++	.cfi_startproc
++	.cfi_signal_frame
++	.cfi_def_cfa	x29, 0
++	.cfi_offset	x29, 0 * 8
++	.cfi_offset	x30, 1 * 8
++	mov	x8, #__NR_rt_sigreturn
++	svc	#0
++	.cfi_endproc
++ENDPROC(__kernel_rt_sigreturn)
+diff --git a/arch/arm64/kernel/vdso_ilp32/vdso.S b/arch/arm64/kernel/vdso_ilp32/vdso.S
+new file mode 100644
+index 000000000000..78c3abd32bbf
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vdso.S
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ */
++
++#include <linux/init.h>
++#include <linux/linkage.h>
++#include <linux/const.h>
++#include <asm/page.h>
++
++	.globl vdso_ilp32_start, vdso_ilp32_end
++	.section .rodata
++	.balign PAGE_SIZE
++vdso_ilp32_start:
++	.incbin "arch/arm64/kernel/vdso_ilp32/vdso.so"
++	.balign PAGE_SIZE
++vdso_ilp32_end:
++
++	.previous
+diff --git a/arch/arm64/kernel/vdso_ilp32/vdso.lds.S b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+new file mode 100644
+index 000000000000..198241225c33
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * GNU linker script for the VDSO library.
++*
++ * Copyright (C) 2012 ARM Limited
++ *
++ * Author: Will Deacon <will.deacon@arm.com>
++ * Heavily based on the vDSO linker scripts for other archs.
++ */
++
++#include <linux/const.h>
++#include <asm/page.h>
++#include <asm/vdso.h>
++
++OUTPUT_FORMAT("elf32-littleaarch64", "elf32-bigaarch64", "elf32-littleaarch64")
++OUTPUT_ARCH(aarch64:ilp32)
++
++SECTIONS
++{
++	PROVIDE(_vdso_data = . - PAGE_SIZE);
++	. = VDSO_LBASE + SIZEOF_HEADERS;
++
++	.hash		: { *(.hash) }			:text
++	.gnu.hash	: { *(.gnu.hash) }
++	.dynsym		: { *(.dynsym) }
++	.dynstr		: { *(.dynstr) }
++	.gnu.version	: { *(.gnu.version) }
++	.gnu.version_d	: { *(.gnu.version_d) }
++	.gnu.version_r	: { *(.gnu.version_r) }
++
++	.note		: { *(.note.*) }		:text	:note
++
++	. = ALIGN(16);
++
++	.text		: { *(.text*) }			:text	=0xd503201f
++	PROVIDE (__etext = .);
++	PROVIDE (_etext = .);
++	PROVIDE (etext = .);
++
++	.eh_frame_hdr	: { *(.eh_frame_hdr) }		:text	:eh_frame_hdr
++	.eh_frame	: { KEEP (*(.eh_frame)) }	:text
++
++	.dynamic	: { *(.dynamic) }		:text	:dynamic
++
++	.rodata		: { *(.rodata*) }		:text
++
++	_end = .;
++	PROVIDE(end = .);
++
++	/DISCARD/	: {
++		*(.note.GNU-stack)
++		*(.data .data.* .gnu.linkonce.d.* .sdata*)
++		*(.bss .sbss .dynbss .dynsbss)
++	}
++}
++
++/*
++ * We must supply the ELF program headers explicitly to get just one
++ * PT_LOAD segment, and set the flags explicitly to make segments read-only.
++ */
++PHDRS
++{
++	text		PT_LOAD		FLAGS(5) FILEHDR PHDRS; /* PF_R|PF_X */
++	dynamic		PT_DYNAMIC	FLAGS(4);		/* PF_R */
++	note		PT_NOTE		FLAGS(4);		/* PF_R */
++	eh_frame_hdr	PT_GNU_EH_FRAME;
++}
++
++/*
++ * This controls what symbols we export from the DSO.
++ */
++VERSION
++{
++	LINUX_2.6.39 {
++	global:
++		__kernel_rt_sigreturn;
++		__kernel_gettimeofday;
++		__kernel_clock_gettime;
++		__kernel_clock_getres;
++	local: *;
++	};
++}
++
++/*
++ * Make the sigreturn code visible to the kernel.
++ */
++VDSO_sigtramp_ilp32	= __kernel_rt_sigreturn;
+diff --git a/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+new file mode 100644
+index 000000000000..747635501a14
+--- /dev/null
++++ b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ARM64 userspace implementations of gettimeofday() and similar.
++ *
++ * Copyright (C) 2018 ARM Limited
++ *
++ */
++#include <linux/time.h>
++#include <linux/types.h>
++
++int __kernel_clock_gettime(clockid_t clock,
++			   struct __kernel_timespec *ts)
++{
++	return __cvdso_clock_gettime(clock, ts);
++}
++
++int __kernel_gettimeofday(struct __kernel_old_timeval *tv,
++			  struct timezone *tz)
++{
++	return __cvdso_gettimeofday(tv, tz);
++}
++
++int __kernel_clock_getres(clockid_t clock_id,
++			  struct __kernel_timespec *res)
++{
++	return __cvdso_clock_getres(clock_id, res);
++}
+diff --git a/copy-files.sh b/copy-files.sh
+new file mode 100755
+index 000000000000..ec1b18676d05
+--- /dev/null
++++ b/copy-files.sh
+@@ -0,0 +1,175 @@
++#!/usr/bin/env bash
++
++usage() {
++	local old_xtrace
++	old_xtrace="$(shopt -po xtrace || :)"
++	set +o xtrace
++	echo "${script_name} - Copy ILP32 base files." >&2
++	echo "Usage: ${script_name} [flags] <file-type>" >&2
++	echo "Option flags:" >&2
++	echo "  -c --check   - Run shellcheck." >&2
++	echo "  -h --help    - Show this help and exit." >&2
++	echo "  -v --verbose - Verbose execution." >&2
++	echo "  -f --force   - Overwrite files without prompting." >&2
++	echo "Args:" >&2
++	echo "  <file-type>  - File type {${file_types} all}." >&2
++	echo "                 Default: '${file_type}'." >&2
++	eval "${old_xtrace}"
++}
++
++process_opts() {
++	local short_opts="chvf"
++	local long_opts="check,help,verbose,force"
++
++	local opts
++	opts=$(getopt --options ${short_opts} --long ${long_opts} -n "${script_name}" -- "$@")
++
++	eval set -- "${opts}"
++
++	while true ; do
++		case "${1}" in
++		-c | --check)
++			check=1
++			shift
++			;;
++		-h | --help)
++			usage=1
++			shift
++			;;
++		-v | --verbose)
++			#verbose=1
++			set -x
++			shift
++			;;
++		-f | --force)
++			force=1
++			shift
++			;;
++		--)
++			file_type=${2}
++			if [[ ${usage} || ${check} ]]; then
++				break
++			fi
++			if ! shift 2; then
++				echo "${script_name}: ERROR: Missing args: <file-type>" >&2
++				usage
++				exit 1
++			fi
++			if [[ -n "${1}" ]]; then
++				echo "${script_name}: ERROR: Got extra args: '${*}'" >&2
++				usage
++				exit 1
++			fi
++			break
++			;;
++		*)
++			echo "${script_name}: ERROR: Internal opts: '${*}'" >&2
++			exit 1
++			;;
++		esac
++	done
++}
++
++on_exit() {
++	local result=${1}
++
++	set +x
++	echo "${script_name}: Done: ${result}" >&2
++}
++
++run_shellcheck() {
++	local file=${1}
++
++	shellcheck=${shellcheck:-"shellcheck"}
++
++	if ! test -x "$(command -v "${shellcheck}")"; then
++		echo "${script_name}: ERROR: Please install '${shellcheck}'." >&2
++		exit 1
++	fi
++
++	${shellcheck} "${file}"
++}
++
++copy_files() {
++	local type=${1}
++	local no_force
++
++	if [[ ! ${force} ]]; then
++		no_force=1
++	fi
++
++	case "${type}" in
++	binfmt)
++		cp -v ${no_force:+-i} \
++			"${SCRIPTS_TOP}/fs/compat_binfmt_elf.c" \
++			"${SCRIPTS_TOP}/fs/binfmt_arm64_ilp32_elf.c"
++		;;
++	signal)
++		cp -v ${no_force:+-i} \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/signal.c" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/signal_ilp32.c"
++		;;
++	syscall)
++		cp -v ${no_force:+-i} \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/sys32.c" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/sys_ilp32.c"
++		;;
++	vdso)
++		mkdir -p "${SCRIPTS_TOP}/arch/arm64/kernel/vdso_ilp32"
++
++		cp -v ${no_force:+-i} \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/gen_vdso_offsets.sh" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/Makefile" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/sigreturn.S" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/vdso.lds.S" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/vdso.S" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso/vgettimeofday.c" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso32/note.c" \
++			"${SCRIPTS_TOP}/arch/arm64/kernel/vdso_ilp32/"
++		;;
++	*)
++		echo "${script_name}: ERROR: Unknown <file-type> '${type}'" >&2
++		usage
++		exit 1
++		;;
++	esac
++}
++
++#===============================================================================
++# program start
++#===============================================================================
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++script_name="${0##*/}"
++
++SCRIPTS_TOP=${SCRIPTS_TOP:-"$(cd "${0%/*}" && pwd)"}
++
++trap "on_exit 'failed.'" EXIT
++set -e
++
++file_types="binfmt signal syscall vdso"
++
++process_opts "${@}"
++
++if [[ ${usage} ]]; then
++	usage
++	trap - EXIT
++	exit 0
++fi
++
++if [[ ${check} ]]; then
++	run_shellcheck "${0}"
++	trap "on_exit 'Success'" EXIT
++	exit 0
++fi
++
++if [[ "${file_type}" == "all" ]]; then
++	for ft in ${file_types}; do
++		copy_files "${ft}"
++	done
++else
++	copy_files "${file_type}"
++fi
++
++trap "on_exit 'Success.'" EXIT
++exit 0
+diff --git a/fs/Kconfig.binfmt b/fs/Kconfig.binfmt
+index 62dc4f577ba1..dc0142b9cf01 100644
+--- a/fs/Kconfig.binfmt
++++ b/fs/Kconfig.binfmt
+@@ -36,6 +36,10 @@ config COMPAT_BINFMT_ELF
+ config ARCH_BINFMT_ELF_STATE
+ 	bool
+ 
++config BINFMT_ARM64_ILP32
++	bool
++	depends on ARM64_ILP32 && BINFMT_ELF
++
+ config BINFMT_ELF_FDPIC
+ 	bool "Kernel support for FDPIC ELF binaries"
+ 	default y if !BINFMT_ELF
+diff --git a/fs/Makefile b/fs/Makefile
+index 14231b4cf383..7e531c53fe53 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -45,6 +45,7 @@ obj-$(CONFIG_BINFMT_ELF)	+= binfmt_elf.o
+ obj-$(CONFIG_COMPAT_BINFMT_ELF)	+= compat_binfmt_elf.o
+ obj-$(CONFIG_BINFMT_ELF_FDPIC)	+= binfmt_elf_fdpic.o
+ obj-$(CONFIG_BINFMT_FLAT)	+= binfmt_flat.o
++obj-$(CONFIG_BINFMT_ARM64_ILP32)	+= binfmt_arm64_ilp32_elf.o
+ 
+ obj-$(CONFIG_FS_MBCACHE)	+= mbcache.o
+ obj-$(CONFIG_FS_POSIX_ACL)	+= posix_acl.o
+diff --git a/fs/binfmt_arm64_ilp32_elf.c b/fs/binfmt_arm64_ilp32_elf.c
+new file mode 100644
+index 000000000000..76e48df06f92
+--- /dev/null
++++ b/fs/binfmt_arm64_ilp32_elf.c
+@@ -0,0 +1,105 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Support for ARM64 ILP32 ELF executables.
++ *
++ * Copyright (C) 2007 Red Hat, Inc.  All rights reserved.
++ *
++ * We use macros to rename the ABI types and machine-dependent
++ * functions used in binfmt_elf.c to compat versions.
++ */
++
++#include <linux/elfcore-compat.h>
++#include <linux/time.h>
++#include <linux/thread_info.h>
++
++/*
++ * Rename the basic ELF layout types to refer to the 32-bit class of files.
++ */
++#undef	ELF_CLASS
++#define ELF_CLASS	ELFCLASS32
++
++#undef	elfhdr
++#undef	elf_phdr
++#undef	elf_shdr
++#undef	elf_note
++#undef	elf_addr_t
++#define elfhdr		elf32_hdr
++#define elf_phdr	elf32_phdr
++#define elf_shdr	elf32_shdr
++#define elf_note	elf32_note
++#define elf_addr_t	Elf32_Addr
++
++/*
++ * Some data types as stored in coredump.
++ */
++#define user_long_t		compat_long_t
++#define user_siginfo_t		compat_siginfo_t
++#define copy_siginfo_to_user	copy_siginfo_to_user32
++
++/*
++ * The machine-dependent core note format types are defined in elfcore-compat.h,
++ * which requires asm/elf.h to define compat_elf_gregset_t et al.
++ */
++#undef compat_elf_gregset_t
++#define compat_elf_gregset_t	elf_gregset_t
++
++#define elf_prstatus	compat_elf_prstatus
++#define elf_prpsinfo	compat_elf_prpsinfo
++
++#undef ns_to_timeval
++#define ns_to_timeval ns_to_compat_timeval
++
++/*
++ * To use this file, asm/elf.h must define compat_elf_check_arch.
++ * The other following macros can be defined if the compat versions
++ * differ from the native ones, or omitted when they match.
++ */
++
++#undef	elf_check_arch
++#define	elf_check_arch(x)		(((x)->e_machine == EM_AARCH64)	\
++					&& (x)->e_ident[EI_CLASS] == ELFCLASS32)
++
++#undef	ELF_PLATFORM
++#if defined(__AARCH64EB__)
++#define	ELF_PLATFORM		("aarch64_be:ilp32")
++#else
++#define	ELF_PLATFORM		("aarch64:ilp32")
++#endif /* defined(__AARCH64EB__) */
++
++#undef	SET_PERSONALITY
++#define	SET_PERSONALITY(ex)						\
++do {									\
++	set_bit(TIF_32BIT, &current->mm->context.flags);	\
++	set_thread_flag(TIF_ILP32);				\
++	clear_thread_flag(TIF_32BIT);					\
++} while (0)
++
++#undef	ARCH_DLINFO
++#define	ARCH_DLINFO							\
++do {									\
++	NEW_AUX_ENT(AT_SYSINFO_EHDR,					\
++		    (elf_addr_t)(long)current->mm->context.vdso);	\
++} while (0)
++
++#undef	ELF_ET_DYN_BASE
++#define	ELF_ET_DYN_BASE	COMPAT_ELF_ET_DYN_BASE
++
++#undef	ELF_HWCAP
++#define	ELF_HWCAP			((u32) cpu_get_elf_hwcap())
++
++#undef	ELF_HWCAP2
++#define	ELF_HWCAP2			((u32) (cpu_get_elf_hwcap() >> 32))
++
++/*
++ * Rename a few of the symbols that binfmt_elf.c will define.
++ * These are all local so the names don't really matter, but it
++ * might make some debugging less confusing not to duplicate them.
++ */
++#define elf_format		compat_elf_format
++#define init_elf_binfmt		init_compat_elf_binfmt
++#define exit_elf_binfmt		exit_compat_elf_binfmt
++
++/*
++ * We share all the actual code with the native (64-bit) version.
++ */
++#include "binfmt_elf.c"
+diff --git a/include/uapi/linux/audit.h b/include/uapi/linux/audit.h
+index c89c6495983d..773466065063 100644
+--- a/include/uapi/linux/audit.h
++++ b/include/uapi/linux/audit.h
+@@ -377,6 +377,8 @@ enum {
+ #define __AUDIT_ARCH_LE	   0x40000000
+ 
+ #define AUDIT_ARCH_AARCH64	(EM_AARCH64|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
++#define AUDIT_ARCH_AARCH64ILP32	(EM_AARCH64|__AUDIT_ARCH_LE)
++
+ #define AUDIT_ARCH_ALPHA	(EM_ALPHA|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
+ #define AUDIT_ARCH_ARCOMPACT	(EM_ARCOMPACT|__AUDIT_ARCH_LE)
+ #define AUDIT_ARCH_ARCOMPACTBE	(EM_ARCOMPACT)
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index cb9ddcc08119..5c1ed78440ea 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -994,6 +994,24 @@ ptrace_get_syscall_info(struct task_struct *child, unsigned long user_size,
+ }
+ #endif /* CONFIG_HAVE_ARCH_TRACEHOOK */
+ 
++static int ptrace_setsigmask(struct task_struct *child, sigset_t *new_set)
++{
++	sigdelsetmask(new_set, sigmask(SIGKILL)|sigmask(SIGSTOP));
++
++	/*
++	 * Every thread does recalc_sigpending() after resume, so
++	 * retarget_shared_pending() and recalc_sigpending() are not
++	 * called here.
++	 */
++	spin_lock_irq(&child->sighand->siglock);
++	child->blocked = *new_set;
++	spin_unlock_irq(&child->sighand->siglock);
++
++	clear_tsk_restore_sigmask(child);
++
++	return 0;
++}
++
+ int ptrace_request(struct task_struct *child, long request,
+ 		   unsigned long addr, unsigned long data)
+ {
+@@ -1072,20 +1090,7 @@ int ptrace_request(struct task_struct *child, long request,
+ 			break;
+ 		}
+ 
+-		sigdelsetmask(&new_set, sigmask(SIGKILL)|sigmask(SIGSTOP));
+-
+-		/*
+-		 * Every thread does recalc_sigpending() after resume, so
+-		 * retarget_shared_pending() and recalc_sigpending() are not
+-		 * called here.
+-		 */
+-		spin_lock_irq(&child->sighand->siglock);
+-		child->blocked = new_set;
+-		spin_unlock_irq(&child->sighand->siglock);
+-
+-		clear_tsk_restore_sigmask(child);
+-
+-		ret = 0;
++		ret = ptrace_setsigmask(child, &new_set);
+ 		break;
+ 	}
+ 
+@@ -1308,6 +1313,7 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
+ {
+ 	compat_ulong_t __user *datap = compat_ptr(data);
+ 	compat_ulong_t word;
++	sigset_t new_set;
+ 	kernel_siginfo_t siginfo;
+ 	int ret;
+ 
+@@ -1347,6 +1353,24 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
+ 		if (!ret)
+ 			ret = ptrace_setsiginfo(child, &siginfo);
+ 		break;
++	case PTRACE_GETSIGMASK:
++		if (addr != sizeof(compat_sigset_t))
++			return -EINVAL;
++
++		ret = put_compat_sigset((compat_sigset_t __user *) datap,
++				&child->blocked, sizeof(compat_sigset_t));
++		break;
++	case PTRACE_SETSIGMASK:
++		if (addr != sizeof(compat_sigset_t))
++			return -EINVAL;
++
++		ret = get_compat_sigset(&new_set,
++				(compat_sigset_t __user *) datap);
++		if (ret)
++			break;
++
++		ret = ptrace_setsigmask(child, &new_set);
++		break;
+ #ifdef CONFIG_HAVE_ARCH_TRACEHOOK
+ 	case PTRACE_GETREGSET:
+ 	case PTRACE_SETREGSET:
+diff --git a/make-patches.sh b/make-patches.sh
+new file mode 100755
+index 000000000000..1bc9d9be8ea8
+--- /dev/null
++++ b/make-patches.sh
+@@ -0,0 +1,153 @@
++#!/usr/bin/env bash
++
++usage() {
++	local old_xtrace
++	old_xtrace="$(shopt -po xtrace || :)"
++	set +o xtrace
++	echo "${script_name} - Generate a Linux ILP32 kernel patch set." >&2
++	echo "Usage: ${script_name} [flags]" >&2
++	echo "Option flags:" >&2
++	echo "  -h --help    - Show this help and exit." >&2
++	echo "  -v --verbose - Verbose execution." >&2
++	echo "  -o --out-dir - Output directory. Default: '${out_dir}'." >&2
++	echo "  -f --force   - Overwrite existing files." >&2
++	echo "  --ver     - Kernel version. Default: '${ver}'." >&2
++	echo "  --src-dir - Kernel source directory. Default: '${src_dir}'." >&2
++	echo "  --remote  - Git 'remote' of branch. Default: '${remote}'." >&2
++	eval "${old_xtrace}"
++}
++
++process_opts() {
++	local short_opts="chvo:f"
++	local long_opts="check,help,verbose,out-dir:,force,ver:,src-dir:,remote:"
++
++	local opts
++	opts=$(getopt --options ${short_opts} --long ${long_opts} -n "${script_name}" -- "$@")
++
++	eval set -- "${opts}"
++
++	while true ; do
++		#echo "${FUNCNAME[0]}: @${1}@ @${2}@"
++		case "${1}" in
++		-h | --help)
++			usage=1
++			shift
++			;;
++		-v | --verbose)
++			#verbose=1
++			set -x
++			shift
++			;;
++		-o | --out-dir)
++			out_dir="${2}"
++			shift 2
++			;;
++		-f | --force)
++			force=1
++			shift
++			;;
++		--ver)
++			ver="${2}"
++			shift 2
++			;;
++		--src-dir)
++			src_dir="${2}"
++			shift 2
++			;;
++		--remote)
++			remote="${2}"
++			shift 2
++			;;
++		--)
++			shift
++			break
++			;;
++		*)
++			echo "${script_name}: ERROR: Internal opts: '${*}'" >&2
++			exit 1
++			;;
++		esac
++	done
++}
++
++on_exit() {
++	local result=${1}
++
++	set +x
++	echo "${script_name}: Done: ${result}" >&2
++}
++
++check_directory() {
++	local src="${1}"
++	local msg="${2}"
++	local usage="${3}"
++
++	if [[ ! -d "${src}" ]]; then
++		echo "${script_name}: ERROR (${FUNCNAME[0]}): Directory not found${msg}: '${src}'" >&2
++		[[ -z "${usage}" ]] || usage
++		exit 1
++	fi
++}
++
++check_opt() {
++	option=${1}
++	shift
++	value=${*}
++
++	if [[ ! ${value} ]]; then
++		echo "${script_name}: ERROR (${FUNCNAME[0]}): Must provide --${option} option." >&2
++		usage
++		exit 1
++	fi
++}
++
++#===============================================================================
++# program start
++#===============================================================================
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++script_name="${0##*/}"
++
++SCRIPTS_TOP=${SCRIPTS_TOP:-"$(cd "${0%/*}" && pwd)"}
++
++trap "on_exit 'failed.'" EXIT
++set -e
++
++process_opts "${@}"
++
++src_dir=${src_dir:-"$(pwd)"}
++out_dir=${out_dir:-"$(pwd)/ilp32-${ver}-patches"}
++#remote=${remote:-"origin"}
++
++if [[ ${usage} ]]; then
++	usage
++	trap - EXIT
++	exit 0
++fi
++
++check_opt 'ver' "${ver}"
++check_opt 'src-dir' "${src_dir}"
++check_directory "${src_dir}" "" "usage"
++
++if [[ ${remote} && ${remote: -1} != "/" ]]; then
++	remote+="/"
++fi
++
++if [[ -d ${out_dir} ]]; then
++	if [[ ! ${force} ]]; then
++		echo "${script_name}: ERROR: '${out_dir}' exists.  Use --force to overwrite." >&2
++		exit 1
++	fi
++	rm -rf "${out_dir}"
++fi
++
++mkdir -p "${out_dir}"
++
++ver_base="${ver%-*}"
++ver_post="${ver##${ver_base}}"
++
++git -C "${src_dir}" format-patch -o "${out_dir}/" "v${ver_base}..${remote}ilp32-${ver_base}.y${ver_post}"
++git -C "${src_dir}" diff --stat --patch "v${ver_base}..${remote}ilp32-${ver_base}.y${ver_post}" > "${out_dir}/ilp32-${ver}.diff"
++
++trap "on_exit 'Success.'" EXIT
++exit 0
+diff --git a/mm/util.c b/mm/util.c
+index 3ad6db9a722e..ec2363d902bd 100644
+--- a/mm/util.c
++++ b/mm/util.c
+@@ -324,7 +324,7 @@ unsigned long randomize_stack_top(unsigned long stack_top)
+ unsigned long arch_randomize_brk(struct mm_struct *mm)
+ {
+ 	/* Is the current task 32bit ? */
+-	if (!IS_ENABLED(CONFIG_64BIT) || is_compat_task())
++	if (!IS_ENABLED(CONFIG_64BIT) || is_32bit_task())
+ 		return randomize_page(mm->brk, SZ_32M);
+ 
+ 	return randomize_page(mm->brk, SZ_1G);
+@@ -335,7 +335,7 @@ unsigned long arch_mmap_rnd(void)
+ 	unsigned long rnd;
+ 
+ #ifdef CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS
+-	if (is_compat_task())
++	if (is_32bit_task())
+ 		rnd = get_random_long() & ((1UL << mmap_rnd_compat_bits) - 1);
+ 	else
+ #endif /* CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS */
+diff --git a/regenerate-patches.sh b/regenerate-patches.sh
+new file mode 100755
+index 000000000000..6f7286f3cd2e
+--- /dev/null
++++ b/regenerate-patches.sh
+@@ -0,0 +1,38 @@
++#!/usr/bin/env bash
++
++set -e
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++SCRIPTS_TOP=${SCRIPTS_TOP:-"$(cd "${BASH_SOURCE%/*}" && pwd)"}
++script_name="${0##*/}"
++
++versions="
++	4.12
++	4.13
++	4.14
++	4.15
++	4.16
++	4.17
++	4.18
++	4.19
++	4.20
++	5.0
++	5.1
++	5.1-refactor
++	5.2-legacy
++	5.2
++	5.3
++	5.4
++"
++
++for v in ${versions}; do
++	echo "${script_name} ===> ${v}"
++	rm -rf "${SCRIPTS_TOP}"/../ilp32--patches/ilp32-${v}-patches
++
++	"${SCRIPTS_TOP}"/make-patches.sh --ver="${v}" --remote="origin" \
++		-o "${SCRIPTS_TOP}"/../ilp32--patches/ilp32-${v}-patches -v
++
++	#git -C "${SCRIPTS_TOP}"/../ilp32--patches add ilp32-${v}-patches
++	#git -C "${SCRIPTS_TOP}"/../ilp32--patches commit -m "fu: ${v}"
++done
++
