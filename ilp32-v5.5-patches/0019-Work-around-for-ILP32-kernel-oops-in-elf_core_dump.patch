@@ -1,0 +1,26 @@
+From ae0b90f8c975eeb467e048883a9353ccd1d8dddb Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Fri, 31 Jan 2020 15:14:00 -0800
+Subject: [PATCH 19/19] Work-around for ILP32 kernel oops in elf_core_dump
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ fs/coredump.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/fs/coredump.c b/fs/coredump.c
+index b1ea7dfbd149..877728258214 100644
+--- a/fs/coredump.c
++++ b/fs/coredump.c
+@@ -594,7 +594,7 @@ void do_coredump(const kernel_siginfo_t *siginfo)
+ 	audit_core_dumps(siginfo->si_signo);
+ 
+ 	binfmt = mm->binfmt;
+-	if (!binfmt || !binfmt->core_dump)
++	if (!binfmt || !binfmt->core_dump || test_thread_flag(TIF_ILP32))
+ 		goto fail;
+ 	if (!__get_dumpable(cprm.mm_flags))
+ 		goto fail;
+-- 
+2.20.1
+
