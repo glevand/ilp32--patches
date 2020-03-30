@@ -1,0 +1,45 @@
+From ac9f84c2b92b92eed974972e6a80a349a28e5318 Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Mon, 2 Mar 2020 20:27:41 -0800
+Subject: [PATCH 20/22] local: Fix link-vmlinux.sh error
+
+---
+ Makefile                | 4 ++--
+ scripts/link-vmlinux.sh | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 4d0711f54047..75ae7a24bb41 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1071,7 +1071,7 @@ ARCH_POSTLINK := $(wildcard $(srctree)/arch/$(SRCARCH)/Makefile.postlink)
+ 
+ # Final link of vmlinux with optional arch pass after final link
+ cmd_link-vmlinux =                                                 \
+-	$(CONFIG_SHELL) $< $(LD) $(KBUILD_LDFLAGS) $(LDFLAGS_vmlinux) ;    \
++	$(BASH) $< $(LD) $(KBUILD_LDFLAGS) $(LDFLAGS_vmlinux) ;    \
+ 	$(if $(ARCH_POSTLINK), $(MAKE) -f $(ARCH_POSTLINK) $@, true)
+ 
+ vmlinux: scripts/link-vmlinux.sh autoksyms_recursive $(vmlinux-deps) FORCE
+@@ -1372,7 +1372,7 @@ clean: rm-files := $(CLEAN_FILES)
+ PHONY += archclean vmlinuxclean
+ 
+ vmlinuxclean:
+-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/link-vmlinux.sh clean
++	$(Q)$(BASH) $(srctree)/scripts/link-vmlinux.sh clean
+ 	$(Q)$(if $(ARCH_POSTLINK), $(MAKE) -f $(ARCH_POSTLINK) clean)
+ 
+ clean: archclean vmlinuxclean
+diff --git a/scripts/link-vmlinux.sh b/scripts/link-vmlinux.sh
+index dd484e92752e..e1b05929eeea 100755
+--- a/scripts/link-vmlinux.sh
++++ b/scripts/link-vmlinux.sh
+@@ -1,4 +1,4 @@
+-#!/bin/sh
++#!/bin/bash
+ # SPDX-License-Identifier: GPL-2.0
+ #
+ # link vmlinux
+-- 
+2.20.1
+
