@@ -1,0 +1,26 @@
+From 6b47035e8b0c104e5a2f67a2a74d2ada8a90abea Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Thu, 28 May 2020 10:55:55 -0700
+Subject: [PATCH 18/22] vdso: Set version to LINUX_4.9
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/kernel/vdso_ilp32/vdso.lds.S | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kernel/vdso_ilp32/vdso.lds.S b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+index 198241225c33..b466d8350483 100644
+--- a/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
++++ b/arch/arm64/kernel/vdso_ilp32/vdso.lds.S
+@@ -71,7 +71,7 @@ PHDRS
+  */
+ VERSION
+ {
+-	LINUX_2.6.39 {
++	LINUX_4.9 {
+ 	global:
+ 		__kernel_rt_sigreturn;
+ 		__kernel_gettimeofday;
+-- 
+2.20.1
+

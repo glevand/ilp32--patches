@@ -1,0 +1,431 @@
+From 4fb5ddf0cd1b44115fae28eee41619e0de285f69 Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Wed, 9 Oct 2019 17:04:02 -0700
+Subject: [PATCH 01/22] local: ilp32 maintainer files
+
+For local maintenance only.
+---
+ ilp32-maintainer/copy-files.sh         | 175 +++++++++++++++++++++++++
+ ilp32-maintainer/make-patches.sh       | 160 ++++++++++++++++++++++
+ ilp32-maintainer/regenerate-patches.sh |  60 +++++++++
+ 3 files changed, 395 insertions(+)
+ create mode 100755 ilp32-maintainer/copy-files.sh
+ create mode 100755 ilp32-maintainer/make-patches.sh
+ create mode 100755 ilp32-maintainer/regenerate-patches.sh
+
+diff --git a/ilp32-maintainer/copy-files.sh b/ilp32-maintainer/copy-files.sh
+new file mode 100755
+index 000000000000..3fac1155f5f6
+--- /dev/null
++++ b/ilp32-maintainer/copy-files.sh
+@@ -0,0 +1,175 @@
++#!/usr/bin/env bash
++
++usage() {
++	local old_xtrace
++	old_xtrace="$(shopt -po xtrace || :)"
++	set +o xtrace
++	echo "${script_name} - Copy ILP32 base files." >&2
++	echo "Usage: ${script_name} [flags] <file-type>" >&2
++	echo "Option flags:" >&2
++	echo "  -h --help    - Show this help and exit." >&2
++	echo "  -v --verbose - Verbose execution." >&2
++	echo "  -d --diff    - Run diff check." >&2
++	echo "  -f --force   - Overwrite files without prompting." >&2
++	echo "Args:" >&2
++	echo "  <file-type>  - File type {${file_types} all}." >&2
++	echo "                 Default: '${file_type}'." >&2
++	eval "${old_xtrace}"
++}
++
++process_opts() {
++	local short_opts="hvdf"
++	local long_opts="help,verbose,diff,force"
++
++	local opts
++	opts=$(getopt --options ${short_opts} --long ${long_opts} -n "${script_name}" -- "$@")
++
++	eval set -- "${opts}"
++
++	while true ; do
++		case "${1}" in
++		-h | --help)
++			usage=1
++			shift
++			;;
++		-v | --verbose)
++			#verbose=1
++			set -x
++			shift
++			;;
++		-d | --diff)
++			diff_check=1
++			shift
++			;;
++		-f | --force)
++			force=1
++			shift
++			;;
++		--)
++			file_type=${2}
++			if [[ ${usage} || ${shell_check}  || ${diff_check} ]]; then
++				break
++			fi
++			if ! shift 2; then
++				echo "${script_name}: ERROR: Missing args: <file-type>" >&2
++				usage
++				exit 1
++			fi
++			if [[ -n "${1}" ]]; then
++				echo "${script_name}: ERROR: Got extra args: '${*}'" >&2
++				usage
++				exit 1
++			fi
++			break
++			;;
++		*)
++			echo "${script_name}: ERROR: Internal opts: '${*}'" >&2
++			exit 1
++			;;
++		esac
++	done
++}
++
++on_exit() {
++	local result=${1}
++
++	set +x
++	echo "${script_name}: Done: ${result}" >&2
++}
++
++diff_check() {
++	if git status | egrep '(modified:|Untracked files:)' > /dev/null; then
++		git status
++		git diff
++		echo "${script_name}: INFO: Files modified."
++	else
++		echo "${script_name}: INFO: No Changes."
++	fi
++}
++
++copy_files() {
++	local type=${1}
++	local no_force
++
++	if [[ ! ${force} ]]; then
++		no_force=1
++	fi
++
++	case "${type}" in
++	binfmt)
++		cp -v ${no_force:+-i} \
++			"${SRC_TOP}/fs/compat_binfmt_elf.c" \
++			"${SRC_TOP}/fs/binfmt_arm64_ilp32_elf.c"
++		;;
++	signal)
++		cp -v ${no_force:+-i} \
++			"${SRC_TOP}/arch/arm64/kernel/signal.c" \
++			"${SRC_TOP}/arch/arm64/kernel/signal_ilp32.c"
++		;;
++	syscall)
++		cp -v ${no_force:+-i} \
++			"${SRC_TOP}/arch/arm64/kernel/sys32.c" \
++			"${SRC_TOP}/arch/arm64/kernel/sys_ilp32.c"
++		;;
++	vdso)
++		mkdir -p "${SRC_TOP}/arch/arm64/kernel/vdso_ilp32"
++
++		cp -v ${no_force:+-i} \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/gen_vdso_offsets.sh" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/Makefile" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/sigreturn.S" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/vdso.lds.S" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/vdso.S" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso/vgettimeofday.c" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso32/note.c" \
++			"${SRC_TOP}/arch/arm64/kernel/vdso_ilp32/"
++		;;
++	*)
++		echo "${script_name}: ERROR: Unknown <file-type> '${type}'" >&2
++		usage
++		exit 1
++		;;
++	esac
++
++	diff_check
++}
++
++#===============================================================================
++# program start
++#===============================================================================
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++script_name="${0##*/}"
++
++SCRIPTS_TOP="${SCRIPTS_TOP:-$(cd "${0%/*}" && pwd)}"
++SRC_TOP="${SRC_TOP:-$(cd "${SCRIPTS_TOP}/.." && pwd)}"
++
++trap "on_exit 'failed.'" EXIT
++set -e
++
++file_types="syscall signal binfmt vdso"
++
++process_opts "${@}"
++
++if [[ ${usage} ]]; then
++	usage
++	trap - EXIT
++	exit 0
++fi
++
++if [[ ${diff_check} ]]; then
++	diff_check
++	trap "on_exit 'Success'" EXIT
++	exit 0
++fi
++
++if [[ "${file_type}" == "all" ]]; then
++	for ft in ${file_types}; do
++		copy_files "${ft}"
++	done
++else
++	copy_files "${file_type}"
++fi
++
++trap "on_exit 'Success.'" EXIT
++exit 0
+diff --git a/ilp32-maintainer/make-patches.sh b/ilp32-maintainer/make-patches.sh
+new file mode 100755
+index 000000000000..2b5f1edb8c26
+--- /dev/null
++++ b/ilp32-maintainer/make-patches.sh
+@@ -0,0 +1,160 @@
++#!/usr/bin/env bash
++
++usage() {
++	local old_xtrace
++	old_xtrace="$(shopt -po xtrace || :)"
++	set +o xtrace
++	echo "${script_name} - Generate a Linux ILP32 kernel patch set." >&2
++	echo "Usage: ${script_name} [flags]" >&2
++	echo "Option flags:" >&2
++	echo "  -h --help    - Show this help and exit." >&2
++	echo "  -v --verbose - Verbose execution." >&2
++	echo "  -o --out-dir - Output directory. Default: '${out_dir}'." >&2
++	echo "  -f --force   - Overwrite existing files." >&2
++	echo "  --ver     - Kernel version. Ex: 5.0. Default: '${ver}'." >&2
++	echo "  --src-dir - Kernel source directory. Default: '${SRC_TOP}'." >&2
++	echo "  --remote  - Git 'remote' of branch. Default: '${remote}'." >&2
++	eval "${old_xtrace}"
++}
++
++process_opts() {
++	local short_opts="chvo:f"
++	local long_opts="check,help,verbose,out-dir:,force,ver:,src-dir:,remote:"
++
++	local opts
++	opts=$(getopt --options ${short_opts} --long ${long_opts} -n "${script_name}" -- "$@")
++
++	eval set -- "${opts}"
++
++	while true ; do
++		#echo "${FUNCNAME[0]}: @${1}@ @${2}@"
++		case "${1}" in
++		-h | --help)
++			usage=1
++			shift
++			;;
++		-v | --verbose)
++			#verbose=1
++			set -x
++			shift
++			;;
++		-o | --out-dir)
++			out_dir="${2}"
++			shift 2
++			;;
++		-f | --force)
++			force=1
++			shift
++			;;
++		--ver)
++			ver="${2}"
++			shift 2
++			;;
++		--src-dir)
++			SRC_TOP="${2}"
++			shift 2
++			;;
++		--remote)
++			remote="${2}"
++			shift 2
++			;;
++		--)
++			shift
++			break
++			;;
++		*)
++			echo "${script_name}: ERROR: Internal opts: '${*}'" >&2
++			exit 1
++			;;
++		esac
++	done
++}
++
++on_exit() {
++	local result=${1}
++
++	set +x
++	echo "${script_name}: Done: ${result}" >&2
++}
++
++check_directory() {
++	local src="${1}"
++	local msg="${2}"
++	local usage="${3}"
++
++	if [[ ! -d "${src}" ]]; then
++		echo "${script_name}: ERROR (${FUNCNAME[0]}): Directory not found${msg}: '${src}'" >&2
++		[[ -z "${usage}" ]] || usage
++		exit 1
++	fi
++}
++
++check_opt() {
++	option=${1}
++	shift
++	value=${*}
++
++	if [[ ! ${value} ]]; then
++		echo "${script_name}: ERROR (${FUNCNAME[0]}): Must provide --${option} option." >&2
++		usage
++		exit 1
++	fi
++}
++
++#===============================================================================
++# program start
++#===============================================================================
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++script_name="${0##*/}"
++
++SCRIPTS_TOP="${SCRIPTS_TOP:-$(cd "${0%/*}" && pwd)}"
++SRC_TOP="${SRC_TOP:-$(cd "${SCRIPTS_TOP}/.." && pwd)}"
++PATCHES_TOP="${PATCHES_TOP:-$(cd "${SRC_TOP}/../ilp32--patches" && pwd)}"
++
++trap "on_exit 'failed.'" EXIT
++set -e
++
++process_opts "${@}"
++
++out_dir="${out_dir:-${PATCHES_TOP}/ilp32-v${ver}-patches}"
++#remote=${remote:-"origin"}
++
++if [[ ${usage} ]]; then
++	usage
++	trap - EXIT
++	exit 0
++fi
++
++check_opt 'ver' "${ver}"
++check_opt 'src-dir' "${SRC_TOP}"
++check_directory "${SRC_TOP}" "" "usage"
++
++if [[ ${remote} && ${remote: -1} != "/" ]]; then
++	remote+="/"
++fi
++
++if [[ -d ${out_dir} ]]; then
++	if [[ ! ${force} ]]; then
++		echo "${script_name}: ERROR: '${out_dir}' exists.  Use --force to overwrite." >&2
++		exit 1
++	fi
++	rm -rf "${out_dir}"
++fi
++
++mkdir -p "${out_dir}"
++
++ver_base="${ver%-*}"
++ver_post="${ver##${ver_base}}"
++
++if [[ ${ver_post} == "-refactor" || ${ver_post} == "-legacy" ]]; then
++	range="v${ver_base}..${remote}ilp32-${ver_base}.y${ver_post}"
++else
++	range="v${ver}..${remote}ilp32-${ver_base}.y"
++fi
++
++git -C "${SRC_TOP}" format-patch -o "${out_dir}/" "${range}"
++git -C "${SRC_TOP}" diff --stat --patch "${range}" > "${out_dir}/ilp32-v${ver}.diff"
++
++trap "on_exit 'Success.'" EXIT
++exit 0
+diff --git a/ilp32-maintainer/regenerate-patches.sh b/ilp32-maintainer/regenerate-patches.sh
+new file mode 100755
+index 000000000000..699249bf44cc
+--- /dev/null
++++ b/ilp32-maintainer/regenerate-patches.sh
+@@ -0,0 +1,60 @@
++#!/usr/bin/env bash
++
++on_exit() {
++	local result=${1}
++
++	set +x
++	echo "${script_name}: Done: ${result}" >&2
++}
++
++#===============================================================================
++
++export PS4='\[\033[0;33m\]+ ${BASH_SOURCE##*/}:${LINENO}:(${FUNCNAME[0]:-"?"}): \[\033[0;37m\]'
++script_name="${0##*/}"
++
++SCRIPTS_TOP="${SCRIPTS_TOP:-$(cd "${0%/*}" && pwd)}"
++SRC_TOP="${SRC_TOP:-$(cd "${SCRIPTS_TOP}/.." && pwd)}"
++PATCHES_TOP="${PATCHES_TOP:-$(cd "${SRC_TOP}/../ilp32--patches" && pwd)}"
++
++trap "on_exit 'failed.'" EXIT
++set -e
++
++versions="
++	4.12
++	4.13
++	4.14
++	4.15
++	4.16
++	4.17
++	4.18
++	4.19
++	4.20
++	5.0
++	5.1
++	5.1-refactor
++	5.2-legacy
++	5.2
++	5.3
++	5.4
++	5.5
++	5.6
++"
++
++if [[ ${1} ]]; then
++	echo "${script_name}: Unknown arg: '${1}'" >&2
++	exit 1
++fi
++
++for v in ${versions}; do
++	echo "${script_name} ===> ${v}"
++	rm -rf "${PATCHES_TOP}/ilp32-${v}-patches"
++
++	"${SCRIPTS_TOP}"/make-patches.sh --ver="${v}" --remote="origin" \
++		-o "${PATCHES_TOP}/ilp32-${v}-patches" -v
++
++	# git -C "${PATCHES_TOP}" add ilp32-${v}-patches
++	# git -C "${PATCHES_TOP}" commit -m "fu: ${v}"
++done
++
++trap "on_exit 'Success.'" EXIT
++exit 0
+-- 
+2.20.1
+

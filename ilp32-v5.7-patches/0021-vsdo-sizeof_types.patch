@@ -1,0 +1,46 @@
+From f1b6c744ca8c089e55a4299e9d89fca24e58f13f Mon Sep 17 00:00:00 2001
+From: Geoff Levand <geoff@infradead.org>
+Date: Thu, 28 May 2020 10:55:55 -0700
+Subject: [PATCH 21/22] vsdo: sizeof_types
+
+Signed-off-by: Geoff Levand <geoff@infradead.org>
+---
+ arch/arm64/kernel/vdso_ilp32/vgettimeofday.c | 22 ++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+index 747635501a14..18cc96a47841 100644
+--- a/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
++++ b/arch/arm64/kernel/vdso_ilp32/vgettimeofday.c
+@@ -8,6 +8,28 @@
+ #include <linux/time.h>
+ #include <linux/types.h>
+ 
++#if 0
++static void sizeof_types(void)
++{
++	struct __kernel_timespec ts;
++	struct old_timespec32 ots32;
++	struct __kernel_old_timeval otv;
++	struct __kernel_old_timeval otv32;
++
++	char (*__1)[sizeof(ts.tv_sec)] = 1;     // 8 bytes.
++	char (*__2)[sizeof(ts.tv_nsec)] = 1;    // 8 bytes.
++
++	char (*__3)[sizeof(ots32.tv_sec)] = 1;  // 4 bytes.
++	char (*__4)[sizeof(ots32.tv_nsec)] = 1; // 4 bytes.
++
++	char (*__5)[sizeof(otv.tv_sec)] = 1;    // 4 bytes.
++	char (*__6)[sizeof(otv.tv_usec)] = 1;   // 4 bytes.
++
++	char (*__7)[sizeof(otv32.tv_sec)] = 1;  // 4 bytes.
++	char (*__8)[sizeof(otv32.tv_usec)] = 1; // 4 bytes.
++}
++#endif
++
+ int __kernel_clock_gettime(clockid_t clock,
+ 			   struct __kernel_timespec *ts)
+ {
+-- 
+2.20.1
+
